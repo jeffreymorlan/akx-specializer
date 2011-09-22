@@ -1,0 +1,14 @@
+This specializer implements the matrix powers kernel, used in communication-avoiding Krylov subspace methods: given a sparse matrix A and vector x, compute A*x, A^2*x, ..., A^k*x (or a different basis spanning the same subspace).
+
+Files included:
+* akx.py - the specializer module itself
+  * akx-static.c, akx-powers.tpl, akx.h - templates for C code
+* test.py - test driver for matrix powers kernel
+* cacg.py - communication-avoiding CG solver
+* cgtest.py - test driver for CA-CG solver
+
+Libraries required:
+* asp (http://aspsejits.pbworks.com/)
+* numpy and scipy (http://www.scipy.org/)
+* PaToH (http://bmi.osu.edu/~umit/software.html#patoh)
+* Intel MKL (not needed for the matrix powers kernel itself, but used for other operations in CA-CG solver)
