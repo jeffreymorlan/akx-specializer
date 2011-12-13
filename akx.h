@@ -104,6 +104,7 @@ struct akx_explicit_block
 	                                // (number of rows, not number of row tiles)
 	index_t *__restrict__ perm;
 
+	int symmetric_opt; // if 1, only upper triangle is stored
 	part_id_t implicit_blocks; // 0 = no implicit cache blocking
 	index_t *__restrict__ level_start;
 	index_t *__restrict__ computation_seq;

@@ -18,6 +18,7 @@ parser.add_option("--cb-part",      help="cache block partitioning method (1 = h
 parser.add_option("--cb-num",       help="number of cache blocks (0 = no cache blocking)", type="int", default=0)
 parser.add_option("--cb-exp",       help="explicit cache blocking", action="store_true", default=False)
 parser.add_option("--cb-rle",       help="enable run length encoding", action="store_true", default=False)
+parser.add_option("--sym",          help="symmetric optimization", action="store_true", default=False)
 options, args = parser.parse_args()
 
 if len(args) != 1:
@@ -83,6 +84,13 @@ if options.tile_height != 1 or options.tile_width != 1:
 		for j in xrange(akxobj.num_blocks(i)):
 			akxobj.block_tile(i, j, options.tile_height, options.tile_width, options.tile_trans)
 	print >>sys.stderr, "done"
+if options.sym:
+	for i in xrange(akxobj.num_threadblocks()):
+		for j in xrange(akxobj.num_blocks(i)):
+			old = akxobj.block_nnzb(i, j)
+			akxobj.block_symm_opt(i, j)
+			new = akxobj.block_nnzb(i, j)
+			print >>sys.stderr, "Block (%d,%d) reduced from %d to %d nonzeros" % (i, j, old, new)
 if options.cb_num and not(options.cb_exp):
 	print >>sys.stderr, "Creating cache blocks...",
 	akxobj.implicitblocks(options.cb_part, options.cb_num, options.cb_rle)

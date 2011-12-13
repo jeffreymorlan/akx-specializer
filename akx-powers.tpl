@@ -19,84 +19,113 @@
 pthread_barrier_t barrier;
 #endif
 
-<%def name="do_tilerow(b_m, b_n, b_transpose)">
+## Load a tile-sized group of variables from y
+<%def name="load_y(y, ib, b_m, b_n, b_transpose)">
+  %if (not b_transpose) and (b_n % 2 == 0):
+    %for i in xrange(b_m):
+      __m128d ${y}${i} = _mm_load_sd(&y[${ib}*${b_m} + ${i}]);
+    %endfor
+  %elif b_transpose and (b_m % 2 == 0):
+    %for i in xrange(0, b_m, 2):
+      __m128d ${y}${i} = _mm_load_pd(&y[${ib}*${b_m} + ${i}]);
+    %endfor
+  %else:
+    %for i in xrange(b_m):
+      double ${y}${i} = y[${ib}*${b_m} + ${i}];
+    %endfor
+  %endif
+</%def>
+
+<%def name="load_y_zero(y, b_m, b_n, b_transpose)">
+  %if (not b_transpose) and (b_n % 2 == 0):
+    %for i in xrange(b_m):
+      __m128d ${y}${i} = _mm_setzero_pd();
+    %endfor
+  %elif b_transpose and (b_m % 2 == 0):
+    %for i in xrange(0, b_m, 2):
+      __m128d ${y}${i} = _mm_setzero_pd();
+    %endfor
+  %else:
+    %for i in xrange(b_m):
+      double ${y}${i} = 0.0;
+    %endfor
+  %endif
+</%def>
+
+## Store a tile-sized group of variables to y
+<%def name="store_y(y, ib, b_m, b_n, b_transpose)">
+  %if (not b_transpose) and (b_n % 2) == 0:
+    %for i in xrange(b_m):
+      _mm_store_sd(&y[${ib}*${b_m} + ${i}], _mm_hadd_pd(${y}${i}, ${y}${i}));
+    %endfor
+  %elif b_transpose and (b_m % 2) == 0:
+    %for i in xrange(0, b_m, 2):
+      _mm_store_pd(&y[${ib}*${b_m} + ${i}], ${y}${i});
+    %endfor
+  %else:
+    %for i in xrange(b_m):
+      y[${ib}*${b_m} + ${i}] = ${y}${i};
+    %endfor
+  %endif
+</%def>
+
+<%def name="load_x(x, jb, b_m, b_n, b_transpose)">
+  %if (not b_transpose) and (b_n % 2 == 0):
+    %for j in xrange(0, b_n, 2):
+      __m128d ${x}${j} = _mm_load_pd(&x[${jb}*${b_n} + ${j}]);
+    %endfor
+  %elif b_transpose and (b_m % 2 == 0):
+    %for j in xrange(b_n):
+      __m128d ${x}${j} = _mm_load1_pd(&x[${jb}*${b_n} + ${j}]);
+    %endfor
+  %else:
+    %for j in xrange(b_n):
+      double ${x}${j} = x[${jb}*${b_n} + ${j}];
+    %endfor
+  %endif
+</%def>
+
+<%def name="do_tile(y, x, b_m, b_n, b_transpose)">
   %if not b_transpose:
     %if b_n % 2 == 0:
       %for i in xrange(b_m):
-        __m128d y${i} = _mm_setzero_pd();
-      %endfor
-      for (jb = A->browptr[ib]; jb < A->browptr[ib+1]; ++jb)
-      {
         %for j in xrange(0, b_n, 2):
-          __m128d x${j} = _mm_load_pd(&x[A->bcolidx[jb]*${b_n} + ${j}]);
+          ${y}${i} = _mm_add_pd(${y}${i}, _mm_mul_pd(${x}${j}, _mm_load_pd(&A->bvalues[jb*${b_m*b_n} + ${i*b_n + j}])));
         %endfor
-        %for i in xrange(b_m):
-          %for j in xrange(0, b_n, 2):
-            y${i} = _mm_add_pd(y${i}, _mm_mul_pd(x${j}, _mm_load_pd(&A->bvalues[jb*${b_m*b_n} + ${i*b_n + j}])));
-          %endfor
-        %endfor
-      }
-      %for i in xrange(b_m):
-        _mm_store_sd(&y[ib*${b_m} + ${i}], _mm_hadd_pd(y${i}, y${i}));
       %endfor
     %else:
       %for i in xrange(b_m):
-        double y${i} = 0.0;
-      %endfor
-      for (jb = A->browptr[ib]; jb < A->browptr[ib+1]; ++jb)
-      {
         %for j in xrange(b_n):
-          double x${j} = x[A->bcolidx[jb]*${b_n} + ${j}];
+          ${y}${i} += A->bvalues[jb*${b_m*b_n} + ${i*b_n + j}] * ${x}${j};
         %endfor
-        %for i in xrange(b_m):
-          %for j in xrange(b_n):
-            y${i} += A->bvalues[jb*${b_m*b_n} + ${i*b_n + j}] * x${j};
-          %endfor
-        %endfor
-      }
-      %for i in xrange(b_m):
-        y[ib*${b_m} + ${i}] = y${i};
       %endfor
     %endif
   %else:
     %if b_m % 2 == 0:
-      %for i in xrange(0, b_m, 2):
-        __m128d y${i} = _mm_setzero_pd();
-      %endfor
-      for (jb = A->browptr[ib]; jb < A->browptr[ib+1]; ++jb)
-      {
-        %for j in xrange(b_n):
-          __m128d x${j} = _mm_load1_pd(&x[A->bcolidx[jb]*${b_n} + ${j}]);
+      %for j in xrange(b_n):
+        %for i in xrange(0, b_m, 2):
+          ${y}${i} = _mm_add_pd(${y}${i}, _mm_mul_pd(${x}${j}, _mm_load_pd(&A->bvalues[jb*${b_m*b_n} + ${j*b_m + i}])));
         %endfor
-        %for j in xrange(b_n):
-          %for i in xrange(0, b_m, 2):
-            y${i} = _mm_add_pd(y${i}, _mm_mul_pd(x${j}, _mm_load_pd(&A->bvalues[jb*${b_m*b_n} + ${j*b_m + i}])));
-          %endfor
-        %endfor
-      }
-      %for i in xrange(0, b_m, 2):
-        _mm_store_pd(&y[ib*${b_m} + ${i}], y${i});
       %endfor
     %else:
-      %for i in xrange(b_m):
-        double y${i} = 0.0;
-      %endfor
-      for (jb = A->browptr[ib]; jb < A->browptr[ib+1]; ++jb)
-      {
-        %for j in xrange(b_n):
-          double x${j} = x[A->bcolidx[jb]*${b_n} + ${j}];
+      %for j in xrange(b_n):
+        %for i in xrange(b_m):
+          ${y}${i} += A->bvalues[jb*${b_m*b_n} + ${j*b_m + i}] * ${x}${j};
         %endfor
-        %for j in xrange(b_n):
-          %for i in xrange(b_m):
-            y${i} += A->bvalues[jb*${b_m*b_n} + ${j*b_m + i}] * x${j};
-          %endfor
-        %endfor
-      }
-      %for i in xrange(b_m):
-        y[ib*${b_m} + ${i}] = y${i};
       %endfor
     %endif
   %endif
+</%def>
+
+<%def name="do_tilerow(b_m, b_n, b_transpose)">
+  ${load_y_zero("y", b_m, b_n, b_transpose)}
+  for (jb = A->browptr[ib]; jb < A->browptr[ib+1]; ++jb)
+  {
+    index_t j = A->bcolidx[jb];
+    ${load_x("x", "j", b_m, b_n, b_transpose)}
+    ${do_tile("y", "x", b_m, b_n, b_transpose)}
+  }
+  ${store_y("y", "ib", b_m, b_n, b_transpose)}
   %if usecoeffs:
     // TODO: use SSE here too
     %for i in xrange(b_m):
@@ -161,6 +190,47 @@ void bcsr_spmv_stanzas_${b_m}_${b_n}_${b_transpose}(
   }
 }
 
+void bcsr_spmv_symmetric_${b_m}_${b_n}_${b_transpose}(
+  const struct bcsr_t *__restrict__ A,
+  const value_t *__restrict__ x,
+  value_t *__restrict__ y,
+%if usecoeffs:
+  value_t coeff,
+%endif
+  index_t mb)
+{
+  index_t ib, jb;
+  for (ib = 0; ib < mb; ++ib)
+  {
+    ${load_y_zero("yi", b_m, b_n, b_transpose)}
+    ${store_y("yi", "ib", b_m, b_n, b_transpose)}
+  }
+  for (ib = 0; ib < mb; ++ib)
+  {
+    ${load_y("yi", "ib", b_m, b_n, b_transpose)}
+    ${load_x("xi", "ib", b_m, b_n, not b_transpose)}
+    for (jb = A->browptr[ib]; jb < A->browptr[ib+1]; ++jb)
+    {
+      index_t j = A->bcolidx[jb];
+      ${load_x("xj", "j", b_m, b_n, b_transpose)}
+      ${do_tile("yi", "xj", b_m, b_n, b_transpose)}
+      if (j > ib && j < mb)
+      {
+        ${load_y("yj", "j", b_m, b_n, not b_transpose)}
+        ${do_tile("yj", "xi", b_m, b_n, not b_transpose)}
+        ${store_y("yj", "j", b_m, b_n, not b_transpose)}
+      }
+    }
+    ${store_y("yi", "ib", b_m, b_n, b_transpose)}
+    %if usecoeffs:
+      // TODO: use SSE here too
+      %for i in xrange(b_m):
+        y[ib*${b_m} + ${i}] += x[ib*${b_m} + ${i}] * coeff;
+      %endfor
+    %endif
+  }
+}
+
 %endfor
 
 struct bcsr_funcs {
@@ -193,12 +263,21 @@ struct bcsr_funcs {
 %endif
     const index_t *__restrict__ computation_seq,
     index_t seq_len);  
+  void (*bcsr_spmv_symmetric)(
+    const struct bcsr_t *__restrict__ A,
+    const value_t *__restrict__ x,
+    value_t *__restrict__ y,
+%if usecoeffs:
+    value_t coeff,
+%endif
+    index_t mb);
 } bcsr_funcs_table[] = {
 %for b_m, b_n, b_transpose in variants:
   { ${b_m}, ${b_n}, ${b_transpose},
     bcsr_spmv_${b_m}_${b_n}_${b_transpose},
     bcsr_spmv_rowlist_${b_m}_${b_n}_${b_transpose},
-    bcsr_spmv_stanzas_${b_m}_${b_n}_${b_transpose} },
+    bcsr_spmv_stanzas_${b_m}_${b_n}_${b_transpose},
+    bcsr_spmv_symmetric_${b_m}_${b_n}_${b_transpose} },
 %endfor
 };
 
@@ -283,7 +362,7 @@ void * do_akx ( void *__restrict__ input )
         for (l = start; l < eb->k; ++l)
         {
           // Monomial basis:
-          bf->bcsr_spmv(
+          (eb->symmetric_opt ? bf->bcsr_spmv_symmetric : bf->bcsr_spmv)(
             eb->A_part,
             V_LOCAL(l),
             V_LOCAL(l+1),

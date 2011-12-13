@@ -461,6 +461,7 @@ void build_explicit_block(
   this_block->perm = n.pins;
 
   _FREE_ (n.levels);
+  this_block->symmetric_opt = 0;
   this_block->implicit_blocks = 0;
 
   _FREE_ (perm);
@@ -775,6 +776,7 @@ static PyObject *AkxObjectC_block_tilesize(AkxObjectC *self, PyObject *args);
 static PyObject *AkxObjectC_block_tilecount(AkxObjectC *self, PyObject *args);
 static PyObject *AkxObjectC_block_tile(AkxObjectC *self, PyObject *args);
 static PyObject *AkxObjectC_block_split(AkxObjectC *self, PyObject *args);
+static PyObject *AkxObjectC_block_symm_opt(AkxObjectC *self, PyObject *args);
 static PyObject *AkxObjectC_explicitblocks(AkxObjectC *self, PyObject *args);
 static PyObject *AkxObjectC_implicitblocks(AkxObjectC *self, PyObject *args);
 static PyObject *AkxObjectC_powers(AkxObjectC *self, PyObject *args);
@@ -793,6 +795,7 @@ static PyMethodDef AkxObjectC_methods[] = {
 	{ "block_tilecount", (PyCFunction)AkxObjectC_block_tilecount, METH_VARARGS },
 	{ "block_tile", (PyCFunction)AkxObjectC_block_tile, METH_VARARGS },
 	{ "block_split", (PyCFunction)AkxObjectC_block_split, METH_VARARGS },
+	{ "block_symm_opt", (PyCFunction)AkxObjectC_block_symm_opt, METH_VARARGS },
 	{ "explicitblocks", (PyCFunction)AkxObjectC_explicitblocks, METH_NOARGS },
 	{ "implicitblocks", (PyCFunction)AkxObjectC_implicitblocks, METH_VARARGS },
 	{ "powers", (PyCFunction)AkxObjectC_powers, METH_VARARGS },
@@ -1134,6 +1137,11 @@ AkxObjectC_block_tile(AkxObjectC *self, PyObject *args)
   if (!block)
     return NULL;
 
+  if (block->symmetric_opt)
+  {
+    PyErr_SetString(PyExc_IndexError, "block already has symmetric optimization");
+    return NULL;
+  }
   if (block->implicit_blocks)
   {
     PyErr_SetString(PyExc_IndexError, "block is already partitioned into cache blocks");
@@ -1309,6 +1317,77 @@ AkxObjectC_block_split(AkxObjectC *self, PyObject *args)
 }
 
 static PyObject *
+AkxObjectC_block_symm_opt(AkxObjectC *self, PyObject *args)
+{
+  int tbno, ebno;
+  if (!PyArg_ParseTuple(args, "ii", &tbno, &ebno))
+    return NULL;
+
+  struct akx_explicit_block *block = get_block(self, tbno, ebno);
+  if (!block)
+    return NULL;
+
+  if (block->A_part->b_m != block->A_part->b_n)
+  {
+    PyErr_SetString(PyExc_ValueError, "block tile size not square");
+    return NULL;
+  }
+
+  if (block->symmetric_opt)
+  {
+    PyErr_SetString(PyExc_ValueError, "symmetric optimization already done");
+    return NULL;
+  }
+
+  if (block->implicit_blocks)
+  {
+    PyErr_SetString(PyExc_ValueError, "symmetric optimization + implicit blocking not yet implemented");
+    return NULL;
+  }
+
+  index_t *browptr;
+  index_t *bcolidx;
+  value_t *bvalues;
+  _ALLOC_ ((void **)&browptr, sizeof(index_t) * (block->A_part->mb + 1));
+  _ALLOC_ ((void **)&bcolidx, sizeof(index_t) * block->A_part->nnzb);
+  _ALLOC_ ((void **)&bvalues, sizeof(value_t) * block->A_part->nnzb * block->A_part->b_m * block->A_part->b_n);
+
+  index_t i, j;
+  nnz_t nnzb = 0;
+  for (i = 0; i < block->A_part->mb; i++)
+  {
+    index_t count;
+    // Skip nonzeros left of diagonal
+    //fprintf(stderr, "i=%d: (%d-%d) - ", i, block->A_part->browptr[i], block->A_part->browptr[i+1]);
+    for (j = block->A_part->browptr[i]; j < block->A_part->browptr[i+1]; j++)
+    {
+      if (block->A_part->bcolidx[j] >= i)
+        break;
+    }
+    // Copy upper-triangle part only
+    count = block->A_part->browptr[i+1] - j;
+    //fprintf(stderr, "j=%d count=%d\n", j, count);
+    browptr[i] = nnzb;
+    memcpy(&bcolidx[nnzb], &block->A_part->bcolidx[j], count * sizeof(index_t));
+    memcpy(&bvalues[nnzb * block->A_part->b_m * block->A_part->b_n],
+           &block->A_part->bvalues[j * block->A_part->b_m * block->A_part->b_n],
+           count * sizeof(value_t) * block->A_part->b_m * block->A_part->b_n);
+    nnzb += count;
+  }
+  browptr[i] = nnzb;
+
+  block->A_part->nnzb = nnzb;
+  _FREE_(block->A_part->browptr);
+  _FREE_(block->A_part->bcolidx);
+  _FREE_(block->A_part->bvalues);
+  block->A_part->browptr = browptr;
+  block->A_part->bcolidx = bcolidx;
+  block->A_part->bvalues = bvalues;
+  block->symmetric_opt = 1;
+  Py_RETURN_NONE;
+}
+
+static PyObject *
 AkxObjectC_explicitblocks(AkxObjectC *self, PyObject *args)
 {
   if (self->p.n_parts == 0)
@@ -1346,6 +1425,11 @@ AkxObjectC_implicitblocks(AkxObjectC *self, PyObject *args)
     for (pp2 = 0; pp2 < tb->explicit_blocks; ++pp2)
     {
       destroy_implicit_blocks(&tb->eb[pp2]);
+      if (tb->eb[pp2].symmetric_opt)
+      {
+        PyErr_SetString(PyExc_ValueError, "symmetric optimization + implicit blocking not yet implemented");
+        return NULL;
+      }
     }
   }
 
