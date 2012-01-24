@@ -314,9 +314,9 @@ void * do_akx ( void *__restrict__ input )
       }
 
       struct bcsr_funcs *bf = bcsr_funcs_table;
-      while (bf->b_m != eb->A_part->b_m ||
-             bf->b_n != eb->A_part->b_n ||
-             bf->b_transpose != eb->A_part->b_transpose)
+      while (bf->b_m != eb->A_part.b_m ||
+             bf->b_n != eb->A_part.b_n ||
+             bf->b_transpose != eb->A_part.b_transpose)
       {
         bf++;
         if (bf == &bcsr_funcs_table[sizeof bcsr_funcs_table / sizeof *bcsr_funcs_table])
@@ -333,7 +333,7 @@ void * do_akx ( void *__restrict__ input )
             index_t lev_end   = eb->level_start[block * eb->k + l + 1];
             //printf("thread %d block %d level %d (%d,%d)\n", pthread_self(), block, l, lev_start, lev_end);
             (eb->implicit_stanza ? bf->bcsr_spmv_stanzas : bf->bcsr_spmv_rowlist)(
-              eb->A_part,
+              &eb->A_part,
               V_LOCAL(l),
               V_LOCAL(l+1),
 %if usecoeffs:
@@ -363,13 +363,13 @@ void * do_akx ( void *__restrict__ input )
         {
           // Monomial basis:
           (eb->symmetric_opt ? bf->bcsr_spmv_symmetric : bf->bcsr_spmv)(
-            eb->A_part,
+            &eb->A_part,
             V_LOCAL(l),
             V_LOCAL(l+1),
 %if usecoeffs:
             data->coeffs[glevel + l],
 %endif
-            (eb->schedule[l] + eb->A_part->b_m - 1) / eb->A_part->b_m);
+            (eb->schedule[l] + eb->A_part.b_m - 1) / eb->A_part.b_m);
           // Newton basis will be the spmv plus a _scal by the chosen shift:
           //   x_{i+1} = Ax_i - \lambda*x_i
           // Chebyshev basis will _scal the result of the spmv by 2 and _axpy with the prev. vector:
@@ -434,7 +434,7 @@ AkxPowers_powers(PyObject *self, PyObject *args)
   }
 %endif
 
-  if (akxobj->p.n_parts == 0)
+  if (akxobj->thread_blocks == 0)
   {
     PyErr_SetString(PyExc_ValueError, "thread blocks not yet created");
     return NULL;
@@ -448,17 +448,15 @@ AkxPowers_powers(PyObject *self, PyObject *args)
   // TODO: Initialize pthreads
   pthread_attr_t attr;
   P( pthread_attr_init( &attr ) );
-  P( pthread_barrier_init( &barrier, NULL, akxobj->p.n_parts ) );
+  P( pthread_barrier_init( &barrier, NULL, akxobj->thread_blocks ) );
 
-  pthread_t *threads;
-  _ALLOC_ ((void**) &threads, akxobj->p.n_parts * sizeof( pthread_t ) );
+  pthread_t *threads = _ALLOC_ (akxobj->thread_blocks * sizeof (pthread_t));
 #endif
     
-  struct akx_data * td;
-  _ALLOC_ ( (void**) &td, akxobj->p.n_parts * sizeof (struct akx_data));
+  struct akx_data *td = _ALLOC_ (akxobj->thread_blocks * sizeof (struct akx_data));
 
   part_id_t pp;
-  for (pp = 0; pp < akxobj->p.n_parts; ++pp)
+  for (pp = 0; pp < akxobj->thread_blocks; ++pp)
   {
     // TODO: sched. affinity stuff
     td[pp].V_global = (value_t *)vecs->data;
@@ -471,18 +469,18 @@ AkxPowers_powers(PyObject *self, PyObject *args)
   }
 
 #ifdef _OPENMP
-  omp_set_num_threads(akxobj->p.n_parts);
+  omp_set_num_threads(akxobj->thread_blocks);
   #pragma omp parallel
   {
     do_akx(&td[omp_get_thread_num()]);
   }
 #else
-  for (pp = 1; pp < akxobj->p.n_parts; ++pp)
+  for (pp = 1; pp < akxobj->thread_blocks; ++pp)
     P( pthread_create( &threads[pp], &attr, &do_akx, (void*) &td[pp] ) );
 
   do_akx (&td[0]);
 
-  for( pp = 1; pp < akxobj->p.n_parts; ++pp ) 
+  for( pp = 1; pp < akxobj->thread_blocks; ++pp ) 
     P( pthread_join( threads[pp], NULL ) );
 
   P( pthread_barrier_destroy( &barrier ) );

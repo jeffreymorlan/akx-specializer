@@ -9,7 +9,7 @@ typedef int index_t;     // Integers from 0 to n (or n+1?)
 typedef double value_t;  // Floating-point values for matrix and vector elements
 typedef int nnz_t;       // Integers from 0 to n^2
 typedef int pin_t;       // Integers from 0 to n^2
-typedef int flag_t;       // Integers from 0 to n^2
+typedef char flag_t;     // Integers from 0 to 1
 
 #define P( condition ) {if( (condition) != 0 ) { printf( "\n FAILURE in %s, line %d\n", __FILE__, __LINE__ );exit( 1 );}}
 
@@ -39,9 +39,9 @@ void _COPY_UAL_ (const void * src, void *dst, size_t bytes)
   memcpy (dst, src, bytes);
 }
 
-void _ALLOC_ ( void ** ptr, size_t bytes)
+void * _ALLOC_ (size_t bytes)
 {
-  *ptr = _mm_malloc (bytes, 16);
+  return _mm_malloc (bytes, 16);
 }
 
 void _FREE_ ( void * ptr )
@@ -66,7 +66,6 @@ struct net
 
 struct set
 {
-	index_t n_elements;
 	index_t capacity;
 	flag_t *__restrict__ flags;
 	index_t *__restrict__ elements;
@@ -76,8 +75,6 @@ struct level_net
 {
 	index_t n_pins;
 	level_t n_levels;
-
-	level_t cur_level;
 
 	index_t *__restrict__ pins;
 	index_t *__restrict__ levels;
@@ -96,7 +93,7 @@ struct partition_data
 struct akx_explicit_block
 {
 	level_t k;
-	struct bcsr_t *__restrict__ A_part;
+	struct bcsr_t A_part;
 	index_t V_size;
 	value_t *__restrict__ V;
 	index_t size;
@@ -129,8 +126,7 @@ struct akx_data
 };
 
 void dest_hypergraph ( struct hypergraph* );
-void extend_net ( const struct bcsr_t*, struct level_net*, level_t, struct set* );
-void compute_closure ( const struct bcsr_t*, struct level_net**, level_t );
+struct level_net *compute_closure ( const struct bcsr_t*, level_t );
 void nets_to_netlist ( const struct level_net*, index_t, struct hypergraph* );
 void compute_partition ( struct hypergraph*, part_id_t, struct partition_data* );
 struct akx_thread_block *make_thread_blocks ( const struct bcsr_t*, const struct partition_data*, level_t );
@@ -145,7 +141,7 @@ typedef struct {
 	PyArrayObject *data;
 	struct bcsr_t A;
 
-	struct partition_data p;
+	part_id_t thread_blocks;
 	struct akx_thread_block *__restrict__ tb;
 
 	PyObject *powers_func;
