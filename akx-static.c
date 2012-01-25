@@ -131,8 +131,13 @@ index_t extend_net(
   return n_elements;
 }
 
-void build_net ( const struct bcsr_t *__restrict__ A, struct level_net *__restrict__ n, level_t k,
-    index_t n_pins, index_t *first_level, struct set *__restrict__ workspace )
+void build_net(
+    const struct bcsr_t *__restrict__ A,
+    struct level_net *__restrict__ n,
+    level_t k,
+    index_t n_pins,
+    index_t *first_level,
+    struct set *__restrict__ workspace)
 {
   assert(workspace->capacity >= A->nb);
   
@@ -154,6 +159,51 @@ void build_net ( const struct bcsr_t *__restrict__ A, struct level_net *__restri
   level_t l;
   for (l = 1; l <= k; l++)
     n->levels[l+1] = extend_net(workspace, A, n->levels[l-1], n->levels[l]);
+
+  // Save result and clear workspace flags for next time
+  n->n_pins = n->levels[k+1];
+  n->pins = _ALLOC_ (n->n_pins * sizeof (index_t));
+  for (i = 0; i < n->n_pins; ++i)
+  {
+    n->pins[i] = workspace->elements[i];
+    workspace->flags[workspace->elements[i]] = 0;
+  }
+}
+
+void build_net_2x(
+    const struct bcsr_t *__restrict__ A1,
+    const struct bcsr_t *__restrict__ A2,
+    struct level_net *__restrict__ n,
+    level_t k,
+    index_t n_pins,
+    index_t *first_level,
+    struct set *__restrict__ workspace)
+{
+  assert(workspace->capacity >= A1->nb);
+  assert(workspace->capacity >= A2->nb);
+  
+  // Manually add 0-level vertices:
+  n->n_levels = k;
+  n->levels = _ALLOC_ ((k + 2) * sizeof (index_t));
+  n->levels[0] = 0;
+  n->levels[1] = n_pins;
+
+  // Load first level into workspace (flags)
+  index_t i;
+  for (i = 0; i < n_pins; ++i)
+  {
+    workspace->elements[i] = first_level[i];
+    workspace->flags[first_level[i]] = 1;
+  }
+
+  // Extend closure levels 1 through k
+  index_t prev = 0;
+  level_t l;
+  for (l = 1; l <= k; l++) {
+    index_t next = extend_net(workspace, A1, n->levels[l-1], n->levels[l]);
+    n->levels[l+1] = extend_net(workspace, A2, prev, next);
+    prev = next;
+  }
 
   // Save result and clear workspace flags for next time
   n->n_pins = n->levels[k+1];
@@ -652,9 +702,23 @@ void make_implicit_blocks (
   {
     // Compute dependencies of cache block
     struct level_net cbn;
-    build_net(&A_temp, &cbn, k, 
-              cbp.ptr[block + 1] - cbp.ptr[block], &cbp.part_to_row[cbp.ptr[block]],
-              workspace);
+    if (this_block->symmetric_opt)
+    {
+      // Computation of row i at level l+1 depends on computation of row j at level l
+      // iff i and j share any element in common, so build net of A^T * A
+      struct bcsr_t AT_temp;
+      bcsr_structure_transpose(&AT_temp, &A_temp, A_temp.mb);
+      build_net_2x(&A_temp, &AT_temp, &cbn, k,
+                   cbp.ptr[block + 1] - cbp.ptr[block], &cbp.part_to_row[cbp.ptr[block]],
+                   workspace);
+      bcsr_free(&AT_temp);
+    }
+    else
+    {
+      build_net(&A_temp, &cbn, k,
+                cbp.ptr[block + 1] - cbp.ptr[block], &cbp.part_to_row[cbp.ptr[block]],
+                workspace);
+    }
 
     for (l = 0; l < k; l++)
     {
@@ -1258,7 +1322,7 @@ AkxObjectC_block_symm_opt(AkxObjectC *self, PyObject *args)
 
   if (block->implicit_blocks)
   {
-    PyErr_SetString(PyExc_ValueError, "symmetric optimization + implicit blocking not yet implemented");
+    PyErr_SetString(PyExc_ValueError, "symmetric optimization cannot be done after implicit blocking");
     return NULL;
   }
 
@@ -1309,11 +1373,6 @@ AkxObjectC_implicitblocks(AkxObjectC *self, PyObject *args)
     for (pp2 = 0; pp2 < tb->explicit_blocks; ++pp2)
     {
       destroy_implicit_blocks(&tb->eb[pp2]);
-      if (tb->eb[pp2].symmetric_opt)
-      {
-        PyErr_SetString(PyExc_ValueError, "symmetric optimization + implicit blocking not yet implemented");
-        return NULL;
-      }
     }
   }
 

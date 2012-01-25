@@ -117,96 +117,17 @@ pthread_barrier_t barrier;
   %endif
 </%def>
 
-<%def name="do_tilerow(b_m, b_n, b_transpose)">
-  ${load_y_zero("y", b_m, b_n, b_transpose)}
-  for (jb = A->browptr[ib]; jb < A->browptr[ib+1]; ++jb)
-  {
-    index_t j = A->bcolidx[jb];
-    ${load_x("x", "j", b_m, b_n, b_transpose)}
-    ${do_tile("y", "x", b_m, b_n, b_transpose)}
-  }
-  ${store_y("y", "ib", b_m, b_n, b_transpose)}
-  %if usecoeffs:
-    // TODO: use SSE here too
-    %for i in xrange(b_m):
-      y[ib*${b_m} + ${i}] += x[ib*${b_m} + ${i}] * coeff;
-    %endfor
-  %endif
-</%def>
-
-%for b_m, b_n, b_transpose in variants:
-
-void bcsr_spmv_${b_m}_${b_n}_${b_transpose}(
-  const struct bcsr_t *__restrict__ A,
-  const value_t *__restrict__ x,
-  value_t *__restrict__ y,
-%if usecoeffs:
-  value_t coeff,
-%endif
-  index_t mb)
-{
-  index_t ib, jb;
-  for (ib = 0; ib < mb; ++ib)
-  {
-    ${do_tilerow(b_m, b_n, b_transpose)}
-  }
-}
-
-void bcsr_spmv_rowlist_${b_m}_${b_n}_${b_transpose}(
-  const struct bcsr_t *__restrict__ A,
-  const value_t *__restrict__ x,
-  value_t *__restrict__ y,
-%if usecoeffs:
-  value_t coeff,
-%endif
-  const index_t *__restrict__ computation_seq,
-  index_t seq_len)
-{
-  index_t q, ib, jb;
-  for (q = 0; q < seq_len; q++)
-  {
-    ib = computation_seq[q];
-    ${do_tilerow(b_m, b_n, b_transpose)}
-  }
-}
-
-void bcsr_spmv_stanzas_${b_m}_${b_n}_${b_transpose}(
-  const struct bcsr_t *__restrict__ A,
-  const value_t *__restrict__ x,
-  value_t *__restrict__ y,
-%if usecoeffs:
-  value_t coeff,
-%endif
-  const index_t *__restrict__ computation_seq,
-  index_t seq_len)
-{
-  index_t q, ib, jb;
-  for (q = 0; q < seq_len; q += 2)
-  {
-    for (ib = computation_seq[q]; ib < computation_seq[q+1]; ib++)
+<%def name="do_tilerow(format, b_m, b_n, b_transpose)">
+  %if format == '':
+    ${load_y_zero("y", b_m, b_n, b_transpose)}
+    for (jb = A->browptr[ib]; jb < A->browptr[ib+1]; ++jb)
     {
-      ${do_tilerow(b_m, b_n, b_transpose)}
+      index_t j = A->bcolidx[jb];
+      ${load_x("x", "j", b_m, b_n, b_transpose)}
+      ${do_tile("y", "x", b_m, b_n, b_transpose)}
     }
-  }
-}
-
-void bcsr_spmv_symmetric_${b_m}_${b_n}_${b_transpose}(
-  const struct bcsr_t *__restrict__ A,
-  const value_t *__restrict__ x,
-  value_t *__restrict__ y,
-%if usecoeffs:
-  value_t coeff,
-%endif
-  index_t mb)
-{
-  index_t ib, jb;
-  for (ib = 0; ib < mb; ++ib)
-  {
-    ${load_y_zero("yi", b_m, b_n, b_transpose)}
-    ${store_y("yi", "ib", b_m, b_n, b_transpose)}
-  }
-  for (ib = 0; ib < mb; ++ib)
-  {
+    ${store_y("y", "ib", b_m, b_n, b_transpose)}
+  %else: ## Symmetric
     ${load_y("yi", "ib", b_m, b_n, b_transpose)}
     ${load_x("xi", "ib", b_m, b_n, not b_transpose)}
     for (jb = A->browptr[ib]; jb < A->browptr[ib+1]; ++jb)
@@ -222,62 +143,117 @@ void bcsr_spmv_symmetric_${b_m}_${b_n}_${b_transpose}(
       }
     }
     ${store_y("yi", "ib", b_m, b_n, b_transpose)}
-    %if usecoeffs:
-      // TODO: use SSE here too
-      %for i in xrange(b_m):
-        y[ib*${b_m} + ${i}] += x[ib*${b_m} + ${i}] * coeff;
-      %endfor
-    %endif
+  %endif
+  %if usecoeffs:
+    // TODO: use SSE here too
+    %for i in xrange(b_m):
+      y[ib*${b_m} + ${i}] += x[ib*${b_m} + ${i}] * coeff;
+    %endfor
+  %endif
+</%def>
+
+%for b_m, b_n, b_transpose in variants:
+%for format in ('', '_symmetric'):
+
+void bcsr_spmv${format}_${b_m}_${b_n}_${b_transpose}(
+  const struct bcsr_t *__restrict__ A,
+  const value_t *__restrict__ x,
+  value_t *__restrict__ y,
+%if usecoeffs:
+  value_t coeff,
+%endif
+  index_t mb)
+{
+  index_t ib, jb;
+  for (ib = 0; ib < mb; ++ib)
+  {
+    ${do_tilerow(format, b_m, b_n, b_transpose)}
+  }
+}
+
+void bcsr_spmv${format}_rowlist_${b_m}_${b_n}_${b_transpose}(
+  const struct bcsr_t *__restrict__ A,
+  const value_t *__restrict__ x,
+  value_t *__restrict__ y,
+%if usecoeffs:
+  value_t coeff,
+%endif
+  index_t mb,
+  const index_t *__restrict__ computation_seq,
+  index_t seq_len)
+{
+  index_t q, ib, jb;
+  for (q = 0; q < seq_len; q++)
+  {
+    ib = computation_seq[q];
+    ${do_tilerow(format, b_m, b_n, b_transpose)}
+  }
+}
+
+void bcsr_spmv${format}_stanzas_${b_m}_${b_n}_${b_transpose}(
+  const struct bcsr_t *__restrict__ A,
+  const value_t *__restrict__ x,
+  value_t *__restrict__ y,
+%if usecoeffs:
+  value_t coeff,
+%endif
+  index_t mb,
+  const index_t *__restrict__ computation_seq,
+  index_t seq_len)
+{
+  index_t q, ib, jb;
+  for (q = 0; q < seq_len; q += 2)
+  {
+    for (ib = computation_seq[q]; ib < computation_seq[q+1]; ib++)
+    {
+      ${do_tilerow(format, b_m, b_n, b_transpose)}
+    }
   }
 }
 
 %endfor
+%endfor
+
+typedef void (*bcsr_func_noimplicit)(
+  const struct bcsr_t *__restrict__ A,
+  const value_t *__restrict__ x,
+  value_t *__restrict__ y,
+%if usecoeffs:
+  value_t coeff,
+%endif
+  index_t mb);
+typedef void (*bcsr_func_implicit)(
+  const struct bcsr_t *__restrict__ A,
+  const value_t *__restrict__ x,
+  value_t *__restrict__ y,
+%if usecoeffs:
+  value_t coeff,
+%endif
+  index_t mb,
+  const index_t *__restrict__ computation_seq,
+  index_t seq_len);
 
 struct bcsr_funcs {
   index_t b_m;
   index_t b_n;
   int b_transpose;
-  void (*bcsr_spmv)(
-    const struct bcsr_t *__restrict__ A,
-    const value_t *__restrict__ x,
-    value_t *__restrict__ y,
-%if usecoeffs:
-    value_t coeff,
-%endif
-    index_t mb);
-  void (*bcsr_spmv_rowlist)(
-    const struct bcsr_t *__restrict__ A,
-    const value_t *__restrict__ x,
-    value_t *__restrict__ y,
-%if usecoeffs:
-    value_t coeff,
-%endif
-    const index_t *__restrict__ computation_seq,
-    index_t seq_len);
-  void (*bcsr_spmv_stanzas)(
-    const struct bcsr_t *__restrict__ A,
-    const value_t *__restrict__ x,
-    value_t *__restrict__ y,
-%if usecoeffs:
-    value_t coeff,
-%endif
-    const index_t *__restrict__ computation_seq,
-    index_t seq_len);  
-  void (*bcsr_spmv_symmetric)(
-    const struct bcsr_t *__restrict__ A,
-    const value_t *__restrict__ x,
-    value_t *__restrict__ y,
-%if usecoeffs:
-    value_t coeff,
-%endif
-    index_t mb);
+  struct {
+    bcsr_func_noimplicit noimplicit;
+    bcsr_func_implicit implicit[2];
+  } funcs[2];
 } bcsr_funcs_table[] = {
 %for b_m, b_n, b_transpose in variants:
   { ${b_m}, ${b_n}, ${b_transpose},
-    bcsr_spmv_${b_m}_${b_n}_${b_transpose},
-    bcsr_spmv_rowlist_${b_m}_${b_n}_${b_transpose},
-    bcsr_spmv_stanzas_${b_m}_${b_n}_${b_transpose},
-    bcsr_spmv_symmetric_${b_m}_${b_n}_${b_transpose} },
+    { { bcsr_spmv_${b_m}_${b_n}_${b_transpose},
+        { bcsr_spmv_rowlist_${b_m}_${b_n}_${b_transpose},
+          bcsr_spmv_stanzas_${b_m}_${b_n}_${b_transpose} }
+      },
+      { bcsr_spmv_symmetric_${b_m}_${b_n}_${b_transpose},
+        { bcsr_spmv_symmetric_rowlist_${b_m}_${b_n}_${b_transpose},
+          bcsr_spmv_symmetric_stanzas_${b_m}_${b_n}_${b_transpose} }
+      }
+    }
+  },
 %endfor
 };
 
@@ -326,19 +302,27 @@ void * do_akx ( void *__restrict__ input )
       level_t l;
       if (eb->implicit_blocks)
       {
+        bcsr_func_implicit func = bf->funcs[eb->symmetric_opt].implicit[eb->implicit_stanza];
         part_id_t block;
-        for (block = 0; block < eb->implicit_blocks; block++) {
-          for (l = start; l < eb->k; l++) {
+
+        if (eb->symmetric_opt)
+          memset(V_LOCAL(start+1), 0, sizeof(value_t) * eb->V_size * (eb->k - start));
+        for (block = 0; block < eb->implicit_blocks; block++)
+        {
+          for (l = start; l < eb->k; l++)
+          {
+            index_t mb = (eb->schedule[l] + eb->A_part.b_m - 1) / eb->A_part.b_m;
             index_t lev_start = eb->level_start[block * eb->k + l];
             index_t lev_end   = eb->level_start[block * eb->k + l + 1];
             //printf("thread %d block %d level %d (%d,%d)\n", pthread_self(), block, l, lev_start, lev_end);
-            (eb->implicit_stanza ? bf->bcsr_spmv_stanzas : bf->bcsr_spmv_rowlist)(
+            func(
               &eb->A_part,
               V_LOCAL(l),
               V_LOCAL(l+1),
 %if usecoeffs:
               data->coeffs[glevel + l],
 %endif
+              mb,
               &eb->computation_seq[lev_start],
               lev_end - lev_start);
           }
@@ -358,11 +342,14 @@ void * do_akx ( void *__restrict__ input )
       }
       else
       {
+        bcsr_func_noimplicit func = bf->funcs[eb->symmetric_opt].noimplicit;
         // Perform k SpMVs
         for (l = start; l < eb->k; ++l)
         {
+          if (eb->symmetric_opt)
+            memset(V_LOCAL(l+1), 0, sizeof(value_t) * eb->V_size);
           // Monomial basis:
-          (eb->symmetric_opt ? bf->bcsr_spmv_symmetric : bf->bcsr_spmv)(
+          func(
             &eb->A_part,
             V_LOCAL(l),
             V_LOCAL(l+1),
