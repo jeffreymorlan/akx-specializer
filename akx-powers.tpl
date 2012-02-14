@@ -120,9 +120,9 @@ pthread_barrier_t barrier;
 <%def name="do_tilerow(format, b_m, b_n, b_transpose)">
   %if format == '':
     ${load_y_zero("y", b_m, b_n, b_transpose)}
-    for (jb = A->browptr[ib]; jb < A->browptr[ib+1]; ++jb)
+    for (jb = browptr[ib]; jb < browptr[ib+1]; ++jb)
     {
-      index_t j = A->bcolidx[jb];
+      index_t j = bcolidx[jb];
       ${load_x("x", "j", b_m, b_n, b_transpose)}
       ${do_tile("y", "x", b_m, b_n, b_transpose)}
     }
@@ -130,9 +130,9 @@ pthread_barrier_t barrier;
   %else: ## Symmetric
     ${load_y("yi", "ib", b_m, b_n, b_transpose)}
     ${load_x("xi", "ib", b_m, b_n, not b_transpose)}
-    for (jb = A->browptr[ib]; jb < A->browptr[ib+1]; ++jb)
+    for (jb = browptr[ib]; jb < browptr[ib+1]; ++jb)
     {
-      index_t j = A->bcolidx[jb];
+      index_t j = bcolidx[jb];
       ${load_x("xj", "j", b_m, b_n, b_transpose)}
       ${do_tile("yi", "xj", b_m, b_n, b_transpose)}
       if (j > ib && j < mb)
@@ -152,10 +152,23 @@ pthread_barrier_t barrier;
   %endif
 </%def>
 
-%for b_m, b_n, b_transpose in variants:
+%for b_m, b_n, b_transpose, browptr_comp, bcolidx_comp in variants:
 %for format in ('', '_symmetric'):
 
-void bcsr_spmv${format}_${b_m}_${b_n}_${b_transpose}(
+<%def name="init(browptr_comp, bcolidx_comp)">
+%if browptr_comp == 0:
+  index_t *__restrict__ browptr = A->browptr;
+%else:
+  uint16_t *__restrict__ browptr = A->browptr16;
+%endif
+%if bcolidx_comp == 0:
+  index_t *__restrict__ bcolidx = A->bcolidx;
+%else:
+  uint16_t *__restrict__ bcolidx = A->bcolidx16;
+%endif
+</%def>
+
+void bcsr_spmv${format}_${b_m}_${b_n}_${b_transpose}_${browptr_comp}_${bcolidx_comp}(
   const struct bcsr_t *__restrict__ A,
   const value_t *__restrict__ x,
   value_t *__restrict__ y,
@@ -165,13 +178,14 @@ void bcsr_spmv${format}_${b_m}_${b_n}_${b_transpose}(
   index_t mb)
 {
   index_t ib, jb;
+  ${init(browptr_comp, bcolidx_comp)}
   for (ib = 0; ib < mb; ++ib)
   {
     ${do_tilerow(format, b_m, b_n, b_transpose)}
   }
 }
 
-void bcsr_spmv${format}_rowlist_${b_m}_${b_n}_${b_transpose}(
+void bcsr_spmv${format}_rowlist_${b_m}_${b_n}_${b_transpose}_${browptr_comp}_${bcolidx_comp}(
   const struct bcsr_t *__restrict__ A,
   const value_t *__restrict__ x,
   value_t *__restrict__ y,
@@ -183,6 +197,7 @@ void bcsr_spmv${format}_rowlist_${b_m}_${b_n}_${b_transpose}(
   index_t seq_len)
 {
   index_t q, ib, jb;
+  ${init(browptr_comp, bcolidx_comp)}
   for (q = 0; q < seq_len; q++)
   {
     ib = computation_seq[q];
@@ -190,7 +205,7 @@ void bcsr_spmv${format}_rowlist_${b_m}_${b_n}_${b_transpose}(
   }
 }
 
-void bcsr_spmv${format}_stanzas_${b_m}_${b_n}_${b_transpose}(
+void bcsr_spmv${format}_stanzas_${b_m}_${b_n}_${b_transpose}_${browptr_comp}_${bcolidx_comp}(
   const struct bcsr_t *__restrict__ A,
   const value_t *__restrict__ x,
   value_t *__restrict__ y,
@@ -202,6 +217,7 @@ void bcsr_spmv${format}_stanzas_${b_m}_${b_n}_${b_transpose}(
   index_t seq_len)
 {
   index_t q, ib, jb;
+  ${init(browptr_comp, bcolidx_comp)}
   for (q = 0; q < seq_len; q += 2)
   {
     for (ib = computation_seq[q]; ib < computation_seq[q+1]; ib++)
@@ -237,20 +253,22 @@ struct bcsr_funcs {
   index_t b_m;
   index_t b_n;
   int b_transpose;
+  int browptr_comp;
+  int bcolidx_comp;
   struct {
     bcsr_func_noimplicit noimplicit;
     bcsr_func_implicit implicit[2];
   } funcs[2];
 } bcsr_funcs_table[] = {
-%for b_m, b_n, b_transpose in variants:
-  { ${b_m}, ${b_n}, ${b_transpose},
-    { { bcsr_spmv_${b_m}_${b_n}_${b_transpose},
-        { bcsr_spmv_rowlist_${b_m}_${b_n}_${b_transpose},
-          bcsr_spmv_stanzas_${b_m}_${b_n}_${b_transpose} }
+%for b_m, b_n, b_transpose, browptr_comp, bcolidx_comp in variants:
+  { ${b_m}, ${b_n}, ${b_transpose}, ${browptr_comp}, ${bcolidx_comp},
+    { { bcsr_spmv_${b_m}_${b_n}_${b_transpose}_${browptr_comp}_${bcolidx_comp},
+        { bcsr_spmv_rowlist_${b_m}_${b_n}_${b_transpose}_${browptr_comp}_${bcolidx_comp},
+          bcsr_spmv_stanzas_${b_m}_${b_n}_${b_transpose}_${browptr_comp}_${bcolidx_comp} }
       },
-      { bcsr_spmv_symmetric_${b_m}_${b_n}_${b_transpose},
-        { bcsr_spmv_symmetric_rowlist_${b_m}_${b_n}_${b_transpose},
-          bcsr_spmv_symmetric_stanzas_${b_m}_${b_n}_${b_transpose} }
+      { bcsr_spmv_symmetric_${b_m}_${b_n}_${b_transpose}_${browptr_comp}_${bcolidx_comp},
+        { bcsr_spmv_symmetric_rowlist_${b_m}_${b_n}_${b_transpose}_${browptr_comp}_${bcolidx_comp},
+          bcsr_spmv_symmetric_stanzas_${b_m}_${b_n}_${b_transpose}_${browptr_comp}_${bcolidx_comp} }
       }
     }
   },
@@ -292,7 +310,9 @@ void * do_akx ( void *__restrict__ input )
       struct bcsr_funcs *bf = bcsr_funcs_table;
       while (bf->b_m != eb->A_part.b_m ||
              bf->b_n != eb->A_part.b_n ||
-             bf->b_transpose != eb->A_part.b_transpose)
+             bf->b_transpose != eb->A_part.b_transpose ||
+             bf->browptr_comp != eb->browptr_comp ||
+             bf->bcolidx_comp != eb->bcolidx_comp)
       {
         bf++;
         if (bf == &bcsr_funcs_table[sizeof bcsr_funcs_table / sizeof *bcsr_funcs_table])

@@ -19,6 +19,7 @@ parser.add_option("--cb-num",       help="number of cache blocks (0 = no cache b
 parser.add_option("--cb-exp",       help="explicit cache blocking", action="store_true", default=False)
 parser.add_option("--cb-rle",       help="enable run length encoding", action="store_true", default=False)
 parser.add_option("--sym",          help="symmetric optimization", action="store_true", default=False)
+parser.add_option("--index-comp",   help="index compression", action="store_true", default=False)
 options, args = parser.parse_args()
 
 if len(args) != 1:
@@ -94,6 +95,12 @@ if options.sym:
 if options.cb_num and not(options.cb_exp):
 	print >>sys.stderr, "Creating cache blocks...",
 	akxobj.implicitblocks(options.cb_part, options.cb_num, options.cb_rle)
+	print >>sys.stderr, "done"
+if options.index_comp:
+	print >>sys.stderr, "Index compression...",
+	for i in xrange(akxobj.num_threadblocks()):
+		for j in xrange(akxobj.num_blocks(i)):
+			akxobj.block_index_comp(i, j)
 	print >>sys.stderr, "done"
 
 if options.m == 0:

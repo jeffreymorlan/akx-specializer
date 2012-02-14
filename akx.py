@@ -187,7 +187,7 @@ def _powers_codegen(akxobj, *args):
 	variants = set()
 	for tb in xrange(akxobj.num_threadblocks()):
 		for eb in xrange(akxobj.num_blocks(tb)):
-			variants.add(akxobj.block_tilesize(tb, eb))
+			variants.add(akxobj.block_variant(tb, eb))
 			#print "TB %2d: %s %s" % (tb, akxobj.block_shape(tb, eb), akxobj.threadblock_tilesize(tb, eb))
 
 	global template_powers

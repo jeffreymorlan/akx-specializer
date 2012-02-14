@@ -23,8 +23,14 @@ struct bcsr_t
 	index_t b_n;
 	int b_transpose; // 0 = row-major, 1 = column-major
 	nnz_t nnzb;
-	index_t *__restrict__ browptr;
-	index_t *__restrict__ bcolidx;
+	union {
+		index_t *__restrict__ browptr;
+		uint16_t *__restrict__ browptr16;
+	};
+	union {
+		index_t *__restrict__ bcolidx;
+		uint16_t *__restrict__ bcolidx16;
+	};
 	value_t *__restrict__ bvalues;
 };
 
@@ -104,8 +110,14 @@ struct akx_explicit_block
 	int symmetric_opt; // if 1, only upper triangle is stored
 	part_id_t implicit_blocks; // 0 = no implicit cache blocking
 	index_t *__restrict__ level_start;
-	index_t *__restrict__ computation_seq;
+	union {
+		index_t *__restrict__ computation_seq;
+		uint16_t *__restrict__ computation_seq16;
+	};
 	int implicit_stanza; // 1 if computation_seq is stanza encoded, 0 if not
+	flag_t browptr_comp;
+	flag_t bcolidx_comp;
+	flag_t computation_seq_comp;
 };
 
 struct akx_thread_block

@@ -546,6 +546,9 @@ void build_explicit_block(
   _FREE_ (n.levels);
   this_block->symmetric_opt = 0;
   this_block->implicit_blocks = 0;
+  this_block->browptr_comp = 0;
+  this_block->bcolidx_comp = 0;
+  this_block->computation_seq_comp = 0;
 
   _FREE_ (perm);
 }
@@ -1040,7 +1043,7 @@ AkxObjectC_block_nnzb_computed(AkxObjectC *self, PyObject *args)
 }
 
 static PyObject *
-AkxObjectC_block_tilesize(AkxObjectC *self, PyObject *args)
+AkxObjectC_block_variant(AkxObjectC *self, PyObject *args)
 {
   int tbno, ebno;
   struct akx_explicit_block *block;
@@ -1052,7 +1055,7 @@ AkxObjectC_block_tilesize(AkxObjectC *self, PyObject *args)
     return NULL;
 
   struct bcsr_t *A = &block->A_part;
-  return Py_BuildValue("iii", A->b_m, A->b_n, A->b_transpose);
+  return Py_BuildValue("iiiii", A->b_m, A->b_n, A->b_transpose, block->browptr_comp, block->bcolidx_comp);
 }
 
 static PyObject *
@@ -1415,6 +1418,60 @@ AkxObjectC_implicitblocks(AkxObjectC *self, PyObject *args)
   Py_RETURN_NONE;
 }
 
+static uint16_t *
+index_comp(index_t *array, size_t size)
+{
+  size_t i;
+  uint16_t *out = _ALLOC_(sizeof(uint16_t) * size);
+  for (i = 0; i < size; i++)
+  {
+    assert(array[i] >= 0 && array[i] < 65536);
+    out[i] = array[i];
+  }
+  _FREE_(array);
+  return out;
+}
+
+static PyObject *
+AkxObjectC_block_index_comp(AkxObjectC *self, PyObject *args)
+{
+  int tbno, ebno;
+  if (!PyArg_ParseTuple(args, "ii", &tbno, &ebno))
+    return NULL;
+
+  struct akx_explicit_block *block = get_block(self, tbno, ebno);
+  if (!block)
+    return NULL;
+
+  // TODO: add checks in other optimizations to prevent them
+  // from attempting to run after this compression
+
+  // browptr ranges from 0 to nnzb
+  if (block->A_part.nnzb < 65536)
+  {
+    block->browptr_comp = 1;
+    block->A_part.browptr16 = index_comp(block->A_part.browptr, block->A_part.mb + 1);
+  }
+  // bcolidx ranges from 0 to nb-1
+  if (block->A_part.nb <= 65536)
+  {
+    block->bcolidx_comp = 1;
+    block->A_part.bcolidx16 = index_comp(block->A_part.bcolidx, block->A_part.nnzb);
+  }
+  // computation_seq ranges from 0 to mb-1
+  // TODO: not yet supported in template
+  /*if (block->implicit_blocks && block->A_part.mb <= 65536)
+  {
+    block->computation_seq_comp = 1;
+    block->computation_seq16 = index_comp(block->computation_seq,
+      block->level_start[block->implicit_blocks * block->k]);
+  }*/
+
+  if (self->powers_func) { Py_DECREF(self->powers_func); self->powers_func = NULL; }
+
+  Py_RETURN_NONE;
+}
+
 static PyObject *
 AkxObjectC_powers(AkxObjectC *self, PyObject *args)
 {
@@ -1470,13 +1527,14 @@ static PyMethodDef AkxObjectC_methods[] = {
 	{ "block_nnzb", (PyCFunction)AkxObjectC_block_nnzb, METH_VARARGS },
 	{ "block_schedule", (PyCFunction)AkxObjectC_block_schedule, METH_VARARGS },
 	{ "block_nnzb_computed", (PyCFunction)AkxObjectC_block_nnzb_computed, METH_VARARGS },
-	{ "block_tilesize", (PyCFunction)AkxObjectC_block_tilesize, METH_VARARGS },
+	{ "block_variant", (PyCFunction)AkxObjectC_block_variant, METH_VARARGS },
 	{ "block_tilecount", (PyCFunction)AkxObjectC_block_tilecount, METH_VARARGS },
 	{ "block_tile", (PyCFunction)AkxObjectC_block_tile, METH_VARARGS },
 	{ "block_split", (PyCFunction)AkxObjectC_block_split, METH_VARARGS },
 	{ "block_symm_opt", (PyCFunction)AkxObjectC_block_symm_opt, METH_VARARGS },
 	{ "explicitblocks", (PyCFunction)AkxObjectC_explicitblocks, METH_NOARGS },
 	{ "implicitblocks", (PyCFunction)AkxObjectC_implicitblocks, METH_VARARGS },
+	{ "block_index_comp", (PyCFunction)AkxObjectC_block_index_comp, METH_VARARGS },
 	{ "powers", (PyCFunction)AkxObjectC_powers, METH_VARARGS },
 	{ NULL, NULL, 0, NULL }
 };
