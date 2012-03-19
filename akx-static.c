@@ -1,5 +1,5 @@
 #undef NDEBUG // for assertions
-//#define TRACE
+#define TRACE
 #include <Python.h>
 #include <numpy/arrayobject.h>
 
@@ -276,122 +276,22 @@ void nets_to_netlist ( const struct level_net* nets, index_t n_nets, struct hype
   }
 }
 
-// cant be a const hypergraph b/c of PaToH fn prototype
-void compute_partition ( struct hypergraph *__restrict__ netlist, part_id_t n_parts, struct partition_data *__restrict__ p )
-{
-  index_t i;
-  p->n = netlist->n_nets;
-  p->n_parts = n_parts;
-  p->row_to_part = _ALLOC_ (netlist->n_nets * sizeof (part_id_t));
-  p->part_to_row = _ALLOC_ (netlist->n_nets * sizeof (index_t));
-  p->row_to_part_row = _ALLOC_ (netlist->n_nets * sizeof (index_t));
-  p->ptr = _ALLOC_ ((n_parts + 1) * sizeof (index_t));
-
-  p->ptr[0] = 0;
-  PaToH_Parameters args;
-  PaToH_Initialize_Parameters(&args, PATOH_CONPART, PATOH_SUGPARAM_DEFAULT);
-  args._k = n_parts;
-  count_t cut;
-#ifdef TRACE
-  fprintf (stderr, " = calling PaToH_Part () ...\n");
-#endif
-  /*fprintf (stderr, ""
-      "netptr: [%p, %p]\n"
-      "pins  : [%p, %p]\n"
-      "rtp:    [%p, %p]\n"
-      "ptr:    [%p, %p]\n"
-      "nnets: %d\n",
-      netlist->netptr, netlist->netptr + netlist->n_nets,
-      netlist->pins, netlist->pins + netlist->netptr[netlist->n_nets + 1] - 1,
-      p->row_to_part, p->row_to_part + netlist->n_nets,
-      p->ptr, p->ptr + n_parts + 1, netlist->n_nets);*/
-  PaToH_Part ( &args, netlist->n_nets, netlist->n_nets, 0, 0, NULL, NULL, netlist->netptr, netlist->pins, NULL, p->row_to_part, p->ptr + 1, &cut );
-
-  PaToH_Free ();
-
-  part_id_t pp;
-  // Assume PaToH saved partweights into p->ptr[1:n_parts]
-#ifdef DEBUG
-  index_t sum = 0;
-  for (pp = 0; pp <= n_parts; ++pp)
-    sum += p->ptr[pp];
-  assert (sum == netlist->n_nets);
-#endif
-
-#ifdef TRACE
-  fprintf (stderr, " = processing PaToH partition ...\n");
-#endif
-  // Auxiliary array, TODO: keep around
-  index_t *__restrict__ offset = _ALLOC_ (n_parts * sizeof (index_t));
-  memset(offset, 0, n_parts * sizeof(index_t));
-
-  // 4 confusing arrays:
-  // row_to_part [ <global row index> ] = <part id who owns that row> (this is filled in by PaToH)
-  // row_to_part_row[ <global row index> ] = <local row index (within the responsible part)>
-  // ptr [ <part id> ] = <offset within part_to_row array corresponding to the beginning of part id's rows>
-  // part_to_row [ ptr[ <part id> ] + <local row index>] = <global row index>
-
-  // Build ptr by integrating the values filled in by PaToH's partweights, so that ptr records cumulative weight rather than weight-per-part
-  for ( pp = 1; pp <= n_parts; ++pp )
-    p->ptr[pp] += p->ptr[pp-1];
-
-  // Build row_to_part_row and part_to_row
-  // The global ordering 0,1,2,...,n is preserved within each part because of this for loop
-  for (i = 0; i < p->n; ++i)
-  {
-    // TODO: unroll
-    index_t part_tmp = p->row_to_part [i];
-    index_t offset_tmp = offset[ part_tmp ]++;
-    p->row_to_part_row [ i ] = offset_tmp;
-    p->part_to_row [ p->ptr[part_tmp] + offset_tmp ] = i;
-  }
-
-  _FREE_ (offset);
-}
-
 void dest_hypergraph ( struct hypergraph * h)
 {
   _FREE_ (h->netptr);
   _FREE_ (h->pins);
 }
 
-void partition_matrix_naive(index_t rows, part_id_t n_parts, struct partition_data *p)
+void partition_matrix_hypergraph(
+  const struct bcsr_t *A,
+  index_t rows,
+  level_t k,
+  part_id_t n_parts,
+  part_id_t *row_to_part,
+  index_t *part_sizes,
+  count_t *cut)
 {
-  p->n = rows;
-  p->n_parts = n_parts;
-  p->row_to_part = _ALLOC_ (p->n * sizeof (part_id_t));
-  p->part_to_row = _ALLOC_ (p->n * sizeof (index_t));
-  p->row_to_part_row = _ALLOC_ (p->n * sizeof (index_t));
-  p->ptr = _ALLOC_ ((n_parts + 1) * sizeof (index_t));
-
-  // Just divide into equally-sized contiguous partitions
-  part_id_t part;
-  for (part = 0; part < n_parts; part++)
-  {
-    index_t start = part*p->n / n_parts;
-    index_t end = (part+1)*p->n / n_parts;
-    index_t i;
-    for (i = start; i < end; i++)
-    {
-      p->row_to_part[i] = part;
-      p->part_to_row[i] = i;
-      p->row_to_part_row[i] = i - start;      
-    }
-    p->ptr[part] = start;
-  }
-  p->ptr[n_parts] = p->n;
-}
-
-void partition_matrix(const struct bcsr_t *A, index_t rows, level_t k, part_id_t n_parts, struct partition_data *p)
-{
-  index_t i, j;
-
-  if (n_parts == 1)
-  {
-    // Don't waste time with trivial partitionings
-    partition_matrix_naive(rows, n_parts, p);
-    return;
-  }
+  index_t i;
 
   /*********************\
    * COMPUTE TRANSPOSE *
@@ -430,7 +330,15 @@ void partition_matrix(const struct bcsr_t *A, index_t rows, level_t k, part_id_t
 #endif
 
   // Call PaToH
-  compute_partition ( &h, n_parts, p );
+  PaToH_Parameters args;
+  PaToH_Initialize_Parameters(&args, PATOH_CONPART, PATOH_SUGPARAM_DEFAULT);
+  args._k = n_parts;
+#ifdef TRACE
+  fprintf (stderr, " = calling PaToH_Part () ...\n");
+#endif
+  PaToH_Part(&args, h.n_nets, h.n_nets, 0, 0, NULL, NULL, h.netptr, h.pins, NULL, row_to_part, part_sizes, cut);
+  PaToH_Free();
+
   dest_hypergraph ( &h );
 }
 
@@ -440,7 +348,7 @@ void build_explicit_block(
   index_t part_size,
   struct set *workspace,
   level_t k,
-  struct akx_explicit_block *this_block)
+  AkxBlock *this_block)
 {
   index_t i, j;
 
@@ -540,7 +448,7 @@ void build_explicit_block(
   A_part->browptr[i] = cur_nnzb;
   A_part->nnzb = cur_nnzb;
   //print_sp_matrix (this_block->A_part, 0);
-  this_block->size = n.levels[k+1] - n.levels[0];
+  this_block->perm_size = n.levels[k+1] - n.levels[0];
   this_block->perm = n.pins;
 
   _FREE_ (n.levels);
@@ -553,95 +461,11 @@ void build_explicit_block(
   _FREE_ (perm);
 }
 
-struct akx_thread_block *make_thread_blocks(
-    const struct bcsr_t *__restrict__ A,
-    const struct partition_data *__restrict__ p,
-    level_t k)
-{
-#ifdef TRACE
-  fprintf (stderr, "== make_thread_blocks () ...\n");
-#endif
-
-  struct akx_thread_block *__restrict__ t_blocks = _ALLOC_ (p->n_parts * sizeof (struct akx_thread_block) );
-
-  // Workspace for transitive closure
-  struct set workspace;
-  workspace_init(&workspace, A->nb);
-
-  index_t i, j;
-  part_id_t pp;
-  for (pp = 0; pp < p->n_parts; ++pp)
-  {
-#ifdef TRACE
-    fprintf (stderr, " = building thread block %d of %d ...\n", pp, p->n_parts);
-#endif
-
-    struct akx_thread_block * this_block = &t_blocks[pp];
-    build_explicit_block(
-      A,
-      &p->part_to_row[p->ptr[pp]],
-      p->ptr[pp + 1] - p->ptr[pp],
-      &workspace,
-      k,
-      &this_block->orig_eb);
-
-    this_block->explicit_blocks = 1;
-    this_block->eb = &this_block->orig_eb;
-  }
-
-  workspace_free(&workspace);
-  return t_blocks;
-}
-
-void make_explicit_blocks(
-    struct set *workspace,
-    const struct akx_explicit_block *__restrict__ old_block,
-    struct akx_explicit_block *__restrict__ new_blocks,
-    int part_alg,
-    int n_parts)
-{
-  level_t k = old_block->k;
-
-  // Partition the thread block into cache blocks
-  index_t b_m = old_block->A_part.b_m;
-  index_t rows = (old_block->schedule[k-1] + b_m - 1) / b_m; // Non-ghost entries only
-  struct partition_data cbp;
-  if (part_alg)
-    partition_matrix (&old_block->A_part, rows, k, n_parts, &cbp);
-  else
-    partition_matrix_naive (rows, n_parts, &cbp);
-
-  part_id_t pp;
-  for (pp = 0; pp < n_parts; ++pp)
-  {
-    struct akx_explicit_block *eb = &new_blocks[pp];
-#ifdef TRACE
-    fprintf (stderr, " = building cache block %d of %d ...\n", pp, n_parts);
-#endif
-    build_explicit_block(
-      &old_block->A_part,            // matrix to take a partition of
-      &cbp.part_to_row[cbp.ptr[pp]], // partition rows array
-      cbp.ptr[pp + 1] - cbp.ptr[pp], // partition rows array size
-      workspace,
-      k,
-      eb);
-
-    // Fix permutation to contain indices for full matrix, not this thread block
-    index_t i;
-    for (i = 0; i < eb->size; i++)
-    {
-      eb->perm[i] = old_block->perm[eb->perm[i]];
-    }
-  }
-
-  dest_partition_data (&cbp);
-}
-
 void make_implicit_blocks (
+    AkxBlock *__restrict__ this_block,
     struct set *workspace,
-    struct akx_explicit_block *__restrict__ this_block,
-    int cblock_part_alg,
-    part_id_t cblocks_per_thread,
+    struct partition_data *cbp,
+    part_id_t nblocks,
     int stanza)
 {
   index_t i, j;
@@ -651,24 +475,15 @@ void make_implicit_blocks (
 
   assert(this_block->A_part.b_m == this_block->A_part.b_n);
 
-  this_block->implicit_blocks = cblocks_per_thread;
+  this_block->implicit_blocks = nblocks;
   this_block->implicit_stanza = stanza;
-
-  // Partition the thread block into cache blocks
-  index_t b_m = this_block->A_part.b_m;
-  index_t rows = (this_block->schedule[k-1] + b_m - 1) / b_m; // Non-ghost entries only
-  struct partition_data cbp;
-  if (cblock_part_alg)
-    partition_matrix (&this_block->A_part, rows, k, cblocks_per_thread, &cbp);
-  else
-    partition_matrix_naive (rows, cblocks_per_thread, &cbp);
 
   // Count number of computations done in this thread block,
   // and make room for worst-case computation sequence array
   i = 0;
   for (l = 0; l < k; l++)
-    i += (this_block->schedule[l] + b_m - 1) / b_m;
-  this_block->level_start = _ALLOC_ ((cblocks_per_thread * k + 1) * sizeof(index_t));
+    i += (this_block->schedule[l] + this_block->A_part.b_m - 1) / this_block->A_part.b_m;
+  this_block->level_start = _ALLOC_ ((nblocks * k + 1) * sizeof(index_t));
   this_block->computation_seq = _ALLOC_ (i*2 * sizeof(index_t));
 
   i = 0;
@@ -701,7 +516,7 @@ void make_implicit_blocks (
   A_temp.nnzb = n;
 
   i = 0;
-  for (block = 0; block < cblocks_per_thread; block++)
+  for (block = 0; block < nblocks; block++)
   {
     // Compute dependencies of cache block
     struct level_net cbn;
@@ -712,22 +527,24 @@ void make_implicit_blocks (
       struct bcsr_t AT_temp;
       bcsr_structure_transpose(&AT_temp, &A_temp, A_temp.mb);
       build_net_2x(&A_temp, &AT_temp, &cbn, k,
-                   cbp.ptr[block + 1] - cbp.ptr[block], &cbp.part_to_row[cbp.ptr[block]],
+                   cbp->ptr[block + 1] - cbp->ptr[block], &cbp->part_to_row[cbp->ptr[block]],
                    workspace);
       bcsr_free(&AT_temp);
+      //printf("[symm] block %d expands from %d to %d\n", block, cbn.levels[1], cbn.levels[k]);
     }
     else
     {
       build_net(&A_temp, &cbn, k,
-                cbp.ptr[block + 1] - cbp.ptr[block], &cbp.part_to_row[cbp.ptr[block]],
+                cbp->ptr[block + 1] - cbp->ptr[block], &cbp->part_to_row[cbp->ptr[block]],
                 workspace);
+      //printf("[asymm] block %d expands from %d to %d\n", block, cbn.levels[1], cbn.levels[k]);
     }
 
     for (l = 0; l < k; l++)
     {
       // It is still not necessary to compute values outside the thread block,
       // even though register tiling can make it look like they're needed
-      index_t limit = (this_block->schedule[l] + b_m - 1) / b_m;
+      index_t limit = (this_block->schedule[l] + this_block->A_part.b_m - 1) / this_block->A_part.b_m;
 
       this_block->level_start[block*k+l] = i;
       if (stanza)
@@ -770,9 +587,18 @@ void make_implicit_blocks (
   _FREE_ (A_temp.browptr);
   _FREE_ (A_temp.bcolidx);
 
-  this_block->level_start[cblocks_per_thread*k] = i;
+  this_block->level_start[nblocks*k] = i;
   _FREE_ (computed_level);
-  dest_partition_data (&cbp);
+}
+
+void destroy_implicit_blocks (AkxBlock *__restrict__ block)
+{
+  if (block->implicit_blocks)
+  {
+    _FREE_ (block->level_start);
+    _FREE_ (block->computation_seq);
+    block->implicit_blocks = 0;
+  }
 }
 
 void print_sp_matrix (const struct bcsr_t *A, index_t max_brow)
@@ -801,240 +627,194 @@ void print_sp_matrix (const struct bcsr_t *A, index_t max_brow)
     }  
 }
 
-void destroy_implicit_blocks (struct akx_explicit_block *__restrict__ block)
+static PyTypeObject AkxBlock_Type;
+
+void matrix_from_arrays(struct bcsr_t *A, PyArrayObject *indptr, PyArrayObject *indices, PyArrayObject *data)
 {
-  if (block->implicit_blocks)
-  {
-    _FREE_ (block->level_start);
-    _FREE_ (block->computation_seq);
-    block->implicit_blocks = 0;
-  }
+  A->mb = A->nb = indptr->dimensions[0] - 1;
+  A->b_m = data->nd > 2 ? data->dimensions[1] : 1;
+  A->b_n = data->nd > 2 ? data->dimensions[2] : 1;
+  A->b_transpose = 0;
+  A->nnzb = data->dimensions[0];
+  A->browptr = (index_t *)indptr->data;
+  A->bcolidx = (index_t *)indices->data;
+  A->bvalues = (value_t *)data->data;
+  //print_sp_matrix (A, 0);
 }
 
-void destroy_explicit_block(struct akx_explicit_block *__restrict__ block)
+int make_partition_data(struct partition_data *p, PyObject *partition, index_t rows, int n_parts)
 {
-  destroy_implicit_blocks(block);
-  bcsr_free(&block->A_part);
-  _FREE_ (block->V);
-  _FREE_ (block->schedule);
-  _FREE_ (block->perm);
-}
+  // ptr [ <part id> ] = <offset within part_to_row array corresponding to the beginning of part id's rows>
+  // part_to_row [ ptr[ <part id> ] + <local row index>] = <global row index>
 
-void destroy_explicit_blocks (struct akx_thread_block *__restrict__ t_block)
-{
-  if (t_block->eb != &t_block->orig_eb)
+  p->part_to_row = _ALLOC_ (rows * sizeof (index_t));
+  p->ptr = _ALLOC_ ((n_parts + 1) * sizeof (index_t));
+
+  part_id_t pp;
+  index_t i;
+
+  if (partition == Py_None)
   {
-    part_id_t p;
-    for (p = 0; p < t_block->explicit_blocks; p++)
+    // Just divide into equally-sized contiguous partitions
+    for (pp = 0; pp < n_parts; pp++)
     {
-      destroy_explicit_block(&t_block->eb[p]);
+      index_t start = pp * rows / n_parts;
+      index_t end = (pp+1) * rows / n_parts;
+      for (i = start; i < end; i++)
+        p->part_to_row[i] = i;
+      p->ptr[pp] = start;
     }
-    _FREE_ (t_block->eb);
-    t_block->explicit_blocks = 1;
-    t_block->eb = &t_block->orig_eb;
+    p->ptr[n_parts] = rows;
+    return 1;
   }
-}
 
-void destroy_thread_blocks (struct akx_thread_block *__restrict__ t_blocks, part_id_t n_blocks)
-{
-  part_id_t p;
-  for (p = 0; p < n_blocks; ++p)
+  PyObject *parray = PyArray_ContiguousFromAny(partition, NPY_INT, 1, 1);
+  if (parray)
   {
-    destroy_explicit_blocks(&t_blocks[p]);
-    destroy_explicit_block(&t_blocks[p].orig_eb);
+    // row_to_part [ <global row index> ] = <part id who owns that row> (this is filled in by PaToH)
+    int *row_to_part = PyArray_DATA(parray);
+    if (PyArray_DIM(parray, 0) != rows)
+    {
+      PyErr_Format(PyExc_IndexError, "partition array has wrong size, got %d expected %d", PyArray_DIM(parray, 0), rows);
+      goto fail;
+    }
+
+    // Count partition sizes
+    memset(p->ptr, 0, (n_parts + 1) * sizeof(index_t));
+    for (i = 0; i < rows; i++) {
+      pp = row_to_part[i];
+      if (pp < 0 || pp >= n_parts)
+      {
+        PyErr_SetString(PyExc_IndexError, "partition array has out-of-bounds value");
+        goto fail;
+      }
+      p->ptr[pp]++;
+    }
+
+    // Make cumulative sum so ptr[pp] points to the end of partition pp
+    for (pp = 1; pp <= n_parts; pp++)
+      p->ptr[pp] += p->ptr[pp-1];
+
+    // Build part_to_row (in the process, ptr[pp] is moved from the end of pp to the start)
+    // The global ordering 0,1,2,...,n is preserved within each part
+    for (i = rows; --i >= 0; )
+      p->part_to_row[--p->ptr[row_to_part[i]]] = i;
+
+    Py_DECREF(parray);
+    return 1;
   }
-  _FREE_ (t_blocks);
+
+  PyErr_SetString(PyExc_TypeError, "partition argument should be None or array");
+fail:
+  p->part_to_row = _ALLOC_ (rows * sizeof (index_t));
+  p->ptr = _ALLOC_ ((n_parts + 1) * sizeof (index_t));
+  return 0;
 }
 
 void dest_partition_data ( struct partition_data * p )
 {
-  _FREE_ (p->row_to_part);
-  _FREE_ (p->row_to_part_row);
   _FREE_ (p->part_to_row);
   _FREE_ (p->ptr);
 }
 
 static PyObject *
-AkxObjectC_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds)
+Akx_tb_partition(PyObject *self, PyObject *args)
 {
-  AkxObjectC *self;
   PyArrayObject *indptr, *indices, *data;
-
-  if (!PyArg_ParseTuple(args, "O!O!O!",
-      &PyArray_Type, &indptr, &PyArray_Type, &indices, &PyArray_Type, &data))
+  int k, n_parts;
+  if (!PyArg_ParseTuple(args, "O!O!O!ii",
+      &PyArray_Type, &indptr, &PyArray_Type, &indices, &PyArray_Type, &data,
+      &k, &n_parts))
   {
     return NULL;
   }
-  kwds = kwds; // unused variable
 
-  self = PyObject_New(AkxObjectC, subtype);
-  if (!self)
+  struct bcsr_t A;
+  matrix_from_arrays(&A, indptr, indices, data);
+
+  PyObject *partition = PyArray_SimpleNew(1, &A.mb, NPY_INT);
+  PyObject *sizes = PyArray_SimpleNew(1, &n_parts, NPY_INT);
+  count_t cut;
+  partition_matrix_hypergraph(&A, A.mb, k, n_parts, PyArray_DATA(partition), PyArray_DATA(sizes), &cut);
+
+  return Py_BuildValue("OOi", partition, sizes, cut);
+}
+
+static PyObject *
+Akx_threadblocks(PyObject *self, PyObject *args)
+{
+  PyArrayObject *indptr, *indices, *data;
+  int k, n_parts;
+  PyObject *partition;
+  if (!PyArg_ParseTuple(args, "O!O!O!iiO",
+      &PyArray_Type, &indptr, &PyArray_Type, &indices, &PyArray_Type, &data,
+      &k, &n_parts, &partition))
+  {
+    return NULL;
+  }
+
+  PyObject *ret = PyList_New(n_parts);
+  if (ret == NULL)
     return NULL;
 
-  self->indptr = indptr;
-  self->indices = indices;
-  self->data = data;
-  Py_INCREF(indptr);
-  Py_INCREF(indices);
-  Py_INCREF(data);
+  struct bcsr_t A;
+  matrix_from_arrays(&A, indptr, indices, data);
 
-  /*******************************************\
-   * COPY CSR MATRIX TO LOCAL DATA STRUCTURE *
-   \*******************************************/
+  struct partition_data p;
+  if (!make_partition_data(&p, partition, A.mb, n_parts))
+    return NULL;
+
+  // Workspace for transitive closure
+  struct set workspace;
+  workspace_init(&workspace, A.nb);
+
+  part_id_t pp;
+  for (pp = 0; pp < n_parts; ++pp)
+  {
 #ifdef TRACE
-  fprintf (stderr, "== A allocs and copies ...\n");
+    fprintf (stderr, " = building thread block %d of %d ...\n", pp, n_parts);
 #endif
-  self->A.mb = self->A.nb = indptr->dimensions[0] - 1;
-  self->A.b_m = data->nd > 2 ? data->dimensions[1] : 1;
-  self->A.b_n = data->nd > 2 ? data->dimensions[2] : 1;
-  self->A.b_transpose = 0;
-  self->A.nnzb = data->dimensions[0];
-  self->A.browptr = (index_t *)indptr->data;
-  self->A.bcolidx = (index_t *)indices->data;
-  self->A.bvalues = (value_t *)data->data;
-  //print_sp_matrix (&self->A, 0);
-
-  self->thread_blocks = 0;
-
-  self->powers_func = NULL;
-
-  return (PyObject *)self;
+    AkxBlock *block = PyObject_New(AkxBlock, &AkxBlock_Type);
+    build_explicit_block(
+      &A,
+      &p.part_to_row[p.ptr[pp]],
+      p.ptr[pp + 1] - p.ptr[pp],
+      &workspace,
+      k,
+      block);
+    PyList_SET_ITEM(ret, pp, (PyObject *)block);
+  }
+  dest_partition_data(&p);
+  workspace_free(&workspace);
+  return ret;
 }
 
 static PyObject *
-AkxObjectC_orig_tilesize(AkxObjectC *self, PyObject *args)
+AkxBlock_shape(AkxBlock *block, PyObject *args)
 {
-  return Py_BuildValue("ii", self->A.b_m, self->A.b_n);
-}
-
-static PyObject *
-AkxObjectC_num_threadblocks(AkxObjectC *self, PyObject *args)
-{
-  return PyInt_FromLong(self->thread_blocks);
-}
-
-static PyObject *
-AkxObjectC_num_blocks(AkxObjectC *self, PyObject *args)
-{
-  int tbno;
-  if (!PyArg_ParseTuple(args, "i", &tbno))
-    return NULL;
-
-  if (tbno < 0 || tbno >= self->thread_blocks)
-  {
-    PyErr_SetString(PyExc_IndexError, "block index out of range");
-    return NULL;  
-  }
-  return PyInt_FromLong(self->tb[tbno].explicit_blocks);
-}
-
-static PyObject *
-AkxObjectC_threadblocks(AkxObjectC *self, PyObject *args)
-{
-  if (self->powers_func) { Py_DECREF(self->powers_func); self->powers_func = NULL; }
-
-  if (self->thread_blocks)
-  {
-    destroy_thread_blocks ( self->tb, self->thread_blocks );
-    self->thread_blocks = 0;
-  }
-
-  if (PyTuple_GET_SIZE(args) != 0)
-  {
-    int k, part_alg, n_parts;
-    if (!PyArg_ParseTuple(args, "iii", &k, &part_alg, &n_parts))
-      return NULL;
-
-    struct partition_data p;
-    if (!part_alg)
-      partition_matrix_naive(self->A.mb, n_parts, &p);
-    else
-      partition_matrix(&self->A, self->A.mb, k, n_parts, &p);
-
-    self->thread_blocks = n_parts;
-    self->tb = make_thread_blocks(&self->A, &p, k);
-    dest_partition_data(&p);
-    // TODO Compute statistics
-  }
-
-  Py_RETURN_NONE;
-}
-
-static struct akx_explicit_block *get_block(AkxObjectC *self, int tbno, int ebno)
-{
-  if (tbno < 0 || tbno >= self->thread_blocks)
-  {
-    PyErr_SetString(PyExc_IndexError, "block index out of range");
-    return NULL;  
-  }
-  struct akx_thread_block *tb = &self->tb[tbno];
-  if (ebno < 0 || ebno >= tb->explicit_blocks)
-  {
-    PyErr_SetString(PyExc_IndexError, "block index out of range");
-    return NULL;  
-  }
-  return &tb->eb[ebno];
-}
-
-static PyObject *
-AkxObjectC_block_shape(AkxObjectC *self, PyObject *args)
-{
-  int tbno, ebno;
-  if (!PyArg_ParseTuple(args, "ii", &tbno, &ebno))
-    return NULL;
-
-  struct akx_explicit_block *block = get_block(self, tbno, ebno);
-  if (!block)
-    return NULL;
-
   struct bcsr_t *A = &block->A_part;
   return Py_BuildValue("ii", A->mb * A->b_m, A->nb * A->b_n);
 }
 
 static PyObject *
-AkxObjectC_block_nnzb(AkxObjectC *self, PyObject *args)
+AkxBlock_nnzb(AkxBlock *block, PyObject *args)
 {
-  int tbno, ebno;
-  struct akx_explicit_block *block;
-  if (!PyArg_ParseTuple(args, "ii", &tbno, &ebno))
-    return NULL;
-
-  block = get_block(self, tbno, ebno);
-  if (!block)
-    return NULL;
-
   return PyInt_FromLong(block->A_part.nnzb);
 }
 
 static PyObject *
-AkxObjectC_block_schedule(AkxObjectC *self, PyObject *args)
+AkxBlock_schedule(AkxBlock *block, PyObject *args)
 {
-  int tbno, ebno;
-  if (!PyArg_ParseTuple(args, "ii", &tbno, &ebno))
-    return NULL;
-
-  struct akx_explicit_block *block = get_block(self, tbno, ebno);
-  if (!block)
-    return NULL;
-
-  // TODO: this assumes that index_t is same size as NPY_INT
   npy_intp size = block->k;
+  // TODO: this assumes that index_t is same size as NPY_INT
   PyObject *obj = PyArray_SimpleNewFromData(1, &size, NPY_INT, block->schedule);
   PyArray_FLAGS(obj) &= ~NPY_WRITEABLE;
   return obj;
 }
 
 static PyObject *
-AkxObjectC_block_nnzb_computed(AkxObjectC *self, PyObject *args)
+AkxBlock_nnzb_computed(AkxBlock *block, PyObject *args)
 {
-  int tbno, ebno;
-  if (!PyArg_ParseTuple(args, "ii", &tbno, &ebno))
-    return NULL;
-
-  struct akx_explicit_block *block = get_block(self, tbno, ebno);
-  if (!block)
-    return NULL;
-
   long nnz = 0;
   level_t level;
   for (level = 0; level < block->k; level++)
@@ -1043,31 +823,17 @@ AkxObjectC_block_nnzb_computed(AkxObjectC *self, PyObject *args)
 }
 
 static PyObject *
-AkxObjectC_block_variant(AkxObjectC *self, PyObject *args)
+AkxBlock_variant(AkxBlock *block, PyObject *args)
 {
-  int tbno, ebno;
-  struct akx_explicit_block *block;
-  if (!PyArg_ParseTuple(args, "ii", &tbno, &ebno))
-    return NULL;
-
-  block = get_block(self, tbno, ebno);
-  if (!block)
-    return NULL;
-
   struct bcsr_t *A = &block->A_part;
   return Py_BuildValue("iiiii", A->b_m, A->b_n, A->b_transpose, block->browptr_comp, block->bcolidx_comp);
 }
 
 static PyObject *
-AkxObjectC_block_tilecount(AkxObjectC *self, PyObject *args)
+AkxBlock_tilecount(AkxBlock *block, PyObject *args)
 {
-  int tbno, ebno, b_m, b_n, samples;
-  struct akx_explicit_block *block;
-  if (!PyArg_ParseTuple(args, "iiiii", &tbno, &ebno, &b_m, &b_n, &samples))
-    return NULL;
-
-  block = get_block(self, tbno, ebno);
-  if (!block)
+  int b_m, b_n, samples;
+  if (!PyArg_ParseTuple(args, "iii", &b_m, &b_n, &samples))
     return NULL;
 
   struct bcsr_t *A = &block->A_part;
@@ -1113,16 +879,10 @@ AkxObjectC_block_tilecount(AkxObjectC *self, PyObject *args)
 #define MAX_TILE_HEIGHT 16
 
 static PyObject *
-AkxObjectC_block_tile(AkxObjectC *self, PyObject *args)
+AkxBlock_tile(AkxBlock *block, PyObject *args)
 {
-  int tbno, ebno, b_m, b_n, b_transpose;
-  struct akx_explicit_block *block;
-
-  if (!PyArg_ParseTuple(args, "iiiii", &tbno, &ebno, &b_m, &b_n, &b_transpose))
-    return NULL;
-
-  block = get_block(self, tbno, ebno);
-  if (!block)
+  int b_m, b_n, b_transpose;
+  if (!PyArg_ParseTuple(args, "iii", &b_m, &b_n, &b_transpose))
     return NULL;
 
   if (block->symmetric_opt)
@@ -1243,30 +1003,55 @@ AkxObjectC_block_tile(AkxObjectC *self, PyObject *args)
   }
   *browptr = nnz;
 
-  bcsr_free(&block->A_part);
-  memcpy(&block->A_part, &Anew, sizeof(struct bcsr_t));
+  AkxBlock *newblock = PyObject_New(AkxBlock, &AkxBlock_Type);
+  newblock->k = block->k;
+  newblock->A_part = Anew;
+  newblock->schedule = _ALLOC_(block->k * sizeof(index_t));
+  memcpy(newblock->schedule, block->schedule, block->k * sizeof(index_t));
+  newblock->perm_size = block->perm_size;
+  newblock->perm = _ALLOC_(block->perm_size * sizeof(index_t));
+  memcpy(newblock->perm, block->perm, block->perm_size * sizeof(index_t));
+  newblock->symmetric_opt = 0;
+  newblock->implicit_blocks = 0;
+  newblock->browptr_comp = 0;
+  newblock->bcolidx_comp = 0;
+  newblock->computation_seq_comp = 0;
 
   // Expand V to accommodate padding
-  _FREE_ (block->V);
   index_t padded_height = Anew.mb * Anew.b_m;
   index_t padded_width = Anew.nb * Anew.b_n;
-  block->V_size = (padded_height > padded_width ? padded_height : padded_width);
-  block->V = _ALLOC_ ((block->k+1) * block->V_size * sizeof (value_t));
+  newblock->V_size = (padded_height > padded_width ? padded_height : padded_width);
+  newblock->V = _ALLOC_ ((newblock->k+1) * newblock->V_size * sizeof (value_t));
+  // Don't let evil stuff like Inf/NaN sneak into the padding by chance
+  memset(newblock->V, 0, (newblock->k+1) * newblock->V_size * sizeof (value_t));
 
-  if (self->powers_func) { Py_DECREF(self->powers_func); self->powers_func = NULL; }
-
-  Py_RETURN_NONE;
+  return (PyObject *)newblock;
 }
 
 static PyObject *
-AkxObjectC_block_split(AkxObjectC *self, PyObject *args)
+AkxBlock_partition(AkxBlock *block, PyObject *args)
 {
-  int tbno, ebno, part_alg, n_parts;
-  if (!PyArg_ParseTuple(args, "iiii", &tbno, &ebno, &part_alg, &n_parts))
+  int n_parts;
+  if (!PyArg_ParseTuple(args, "i", &n_parts))
     return NULL;
 
-  struct akx_explicit_block *block = get_block(self, tbno, ebno);
-  if (!block)
+  index_t b_m = block->A_part.b_m;
+  index_t rows = (block->schedule[block->k-1] + b_m - 1) / b_m; // Non-ghost entries only
+
+  PyObject *partition = PyArray_SimpleNew(1, &rows, NPY_INT);
+  PyObject *sizes = PyArray_SimpleNew(1, &n_parts, NPY_INT);
+  count_t cut;
+  partition_matrix_hypergraph(&block->A_part, rows, block->k, n_parts, PyArray_DATA(partition), PyArray_DATA(sizes), &cut);
+
+  return Py_BuildValue("OOi", partition, sizes, cut);
+}
+
+static PyObject *
+AkxBlock_split(AkxBlock *block, PyObject *args)
+{
+  int n_parts;
+  PyObject *partition;
+  if (!PyArg_ParseTuple(args, "iO", &n_parts, &partition))
     return NULL;
 
   if (n_parts < 2)
@@ -1275,42 +1060,52 @@ AkxObjectC_block_split(AkxObjectC *self, PyObject *args)
     return NULL;
   }
 
-  if (self->powers_func) { Py_DECREF(self->powers_func); self->powers_func = NULL; }
+  PyObject *ret = PyList_New(n_parts);
+  if (ret == NULL)
+    return NULL;
+
+  index_t b_m = block->A_part.b_m;
+  index_t rows = (block->schedule[block->k-1] + b_m - 1) / b_m; // Non-ghost entries only
+  struct partition_data cbp;
+  if (!make_partition_data(&cbp, partition, rows, n_parts))
+  {
+    Py_DECREF(ret);
+    return NULL;
+  }
 
   // Workspace for transitive closure
   struct set workspace;
   workspace_init(&workspace, block->A_part.nb);
 
-  struct akx_thread_block *tb = &self->tb[tbno];
-  struct akx_explicit_block *new_eb;
-  new_eb = _ALLOC_ ((tb->explicit_blocks + n_parts - 1) * sizeof(struct akx_explicit_block));
-  memcpy(new_eb, tb->eb, ebno * sizeof(struct akx_explicit_block));
-  make_explicit_blocks(&workspace, block, &new_eb[ebno], part_alg, n_parts);
-  memcpy(&new_eb[ebno + n_parts], &tb->eb[ebno + 1], (tb->explicit_blocks - ebno - 1) * sizeof(struct akx_explicit_block));
-
-  if (tb->eb != &tb->orig_eb)
+  part_id_t pp;
+  for (pp = 0; pp < n_parts; ++pp)
   {
-    destroy_explicit_block(block);
-    _FREE_ (tb->eb);
-  }
-  tb->explicit_blocks += n_parts - 1;
-  tb->eb = new_eb;
+#ifdef TRACE
+    fprintf (stderr, " = building cache block %d of %d ...\n", pp, n_parts);
+#endif
+    AkxBlock *newblock = PyObject_New(AkxBlock, &AkxBlock_Type);
+    build_explicit_block(
+      &block->A_part,                 // matrix to take a partition of
+      &cbp.part_to_row[cbp.ptr[pp]], // partition rows array
+      cbp.ptr[pp + 1] - cbp.ptr[pp], // partition rows array size
+      &workspace,
+      block->k,
+      newblock);
 
+    // Fix permutation to contain indices for full matrix, not this thread block
+    index_t i;
+    for (i = 0; i < newblock->perm_size; i++)
+      newblock->perm[i] = block->perm[newblock->perm[i]];
+    PyList_SET_ITEM(ret, pp, (PyObject *)newblock);
+  }
   workspace_free(&workspace);
-  Py_RETURN_NONE;
+  dest_partition_data(&cbp);
+  return ret;
 }
 
 static PyObject *
-AkxObjectC_block_symm_opt(AkxObjectC *self, PyObject *args)
+AkxBlock_symm_opt(AkxBlock *block, PyObject *args)
 {
-  int tbno, ebno;
-  if (!PyArg_ParseTuple(args, "ii", &tbno, &ebno))
-    return NULL;
-
-  struct akx_explicit_block *block = get_block(self, tbno, ebno);
-  if (!block)
-    return NULL;
-
   if (block->A_part.b_m != block->A_part.b_n)
   {
     PyErr_SetString(PyExc_ValueError, "block tile size not square");
@@ -1339,81 +1134,34 @@ AkxObjectC_block_symm_opt(AkxObjectC *self, PyObject *args)
 }
 
 static PyObject *
-AkxObjectC_explicitblocks(AkxObjectC *self, PyObject *args)
+AkxBlock_implicitblocks(AkxBlock *block, PyObject *args)
 {
-  if (self->thread_blocks == 0)
-  {
-    PyErr_SetString(PyExc_ValueError, "thread blocks not yet created");
+  destroy_implicit_blocks(block);
+
+  if (PyTuple_GET_SIZE(args) == 0)
+    Py_RETURN_NONE;
+
+  int n_parts, stanza;
+  PyObject *partition;
+  if (!PyArg_ParseTuple(args, "iOi", &n_parts, &partition, &stanza))
     return NULL;
-  }
 
-  if (self->powers_func) { Py_DECREF(self->powers_func); self->powers_func = NULL; }
-
-  part_id_t pp;
-  for (pp = 0; pp < self->thread_blocks; ++pp)
-  {
-    destroy_explicit_blocks(&self->tb[pp]);
-  }
-
-  Py_RETURN_NONE;
-}
-
-static PyObject *
-AkxObjectC_implicitblocks(AkxObjectC *self, PyObject *args)
-{
-  if (self->thread_blocks == 0)
-  {
-    PyErr_SetString(PyExc_ValueError, "thread blocks not yet created");
+  // Partition the thread block into cache blocks
+  index_t b_m = block->A_part.b_m;
+  index_t rows = (block->schedule[block->k-1] + b_m - 1) / b_m; // Non-ghost entries only
+  struct partition_data cbp;
+  if (!make_partition_data(&cbp, partition, rows, n_parts))
     return NULL;
-  }
 
-  if (self->powers_func) { Py_DECREF(self->powers_func); self->powers_func = NULL; }
+  // Workspace for transitive closure
+  struct set workspace;
+  workspace_init(&workspace, block->A_part.nb);
 
-  part_id_t pp, pp2;
-  for (pp = 0; pp < self->thread_blocks; ++pp)
-  {
-    struct akx_thread_block *tb = &self->tb[pp];
-    for (pp2 = 0; pp2 < tb->explicit_blocks; ++pp2)
-    {
-      destroy_implicit_blocks(&tb->eb[pp2]);
-    }
-  }
+  make_implicit_blocks(block, &workspace, &cbp, n_parts, stanza);
 
-  if (PyTuple_GET_SIZE(args) != 0)
-  {
-    int part_alg, n_parts, stanza;
-    if (!PyArg_ParseTuple(args, "iii", &part_alg, &n_parts, &stanza))
-      return NULL;
+  workspace_free(&workspace);
 
-    // Workspace for transitive closure
-    struct set workspace;
-    index_t capacity = 0;
-    for (pp = 0; pp < self->thread_blocks; ++pp)
-    {
-      struct akx_thread_block *tb = &self->tb[pp];
-      for (pp2 = 0; pp2 < tb->explicit_blocks; ++pp2)
-      {
-        struct akx_explicit_block *eb = &tb->eb[pp2];
-        if (eb->A_part.nb > capacity)
-          capacity = eb->A_part.nb;
-      }
-    }
-    workspace_init(&workspace, capacity);
-
-    for (pp = 0; pp < self->thread_blocks; ++pp)
-    {
-#ifdef TRACE
-      fprintf (stderr, " = building cache blocks for thread block %d of %d ...\n", pp, self->thread_blocks);
-#endif
-      struct akx_thread_block *tb = &self->tb[pp];
-      for (pp2 = 0; pp2 < tb->explicit_blocks; ++pp2)
-      {
-        make_implicit_blocks(&workspace, &tb->eb[pp2], part_alg, n_parts, stanza);
-      }
-    }
-
-    workspace_free(&workspace);
-  }
+  dest_partition_data(&cbp);
 
   Py_RETURN_NONE;
 }
@@ -1433,16 +1181,8 @@ index_comp(index_t *array, size_t size)
 }
 
 static PyObject *
-AkxObjectC_block_index_comp(AkxObjectC *self, PyObject *args)
+AkxBlock_index_comp(AkxBlock *block, PyObject *args)
 {
-  int tbno, ebno;
-  if (!PyArg_ParseTuple(args, "ii", &tbno, &ebno))
-    return NULL;
-
-  struct akx_explicit_block *block = get_block(self, tbno, ebno);
-  if (!block)
-    return NULL;
-
   // TODO: add checks in other optimizations to prevent them
   // from attempting to run after this compression
 
@@ -1467,87 +1207,49 @@ AkxObjectC_block_index_comp(AkxObjectC *self, PyObject *args)
       block->level_start[block->implicit_blocks * block->k]);
   }*/
 
-  if (self->powers_func) { Py_DECREF(self->powers_func); self->powers_func = NULL; }
-
   Py_RETURN_NONE;
 }
 
-static PyObject *
-AkxObjectC_powers(AkxObjectC *self, PyObject *args)
-{
-  PyArrayObject *vecs, *coeffs = NULL;
-  if (!PyArg_ParseTuple(args, "O!|O!", &PyArray_Type, &vecs, &PyArray_Type, &coeffs))
-    return NULL;
-
-  if (!self->powers_func) {
-    PyObject *akx = PyImport_ImportModule("akx");
-    if (akx) {
-      PyObject *powers_codegen = PyObject_GetAttrString(akx, "_powers_codegen");
-      if (powers_codegen) {
-        if (coeffs)
-          self->powers_func = PyObject_CallFunction(powers_codegen, "OOO", self, vecs, coeffs);
-        else
-          self->powers_func = PyObject_CallFunction(powers_codegen, "OO", self, vecs);
-        Py_DECREF(powers_codegen);
-      }
-      Py_DECREF(akx);
-    }
-  }
-  if (!self->powers_func)
-    return NULL;
-
-  if (coeffs)
-    return PyObject_CallFunction(self->powers_func, "OOO", self, vecs, coeffs);
-  else
-    return PyObject_CallFunction(self->powers_func, "OO", self, vecs);
-}
-
 static void
-AkxObjectC_dealloc(AkxObjectC *self)
+AkxBlock_dealloc(AkxBlock *block)
 {
-  if (self->thread_blocks)
-  {
-    destroy_thread_blocks ( self->tb, self->thread_blocks );
-  }
-
-  Py_DECREF(self->indptr);
-  Py_DECREF(self->indices);
-  Py_DECREF(self->data);
-
-  if (self->powers_func) { Py_DECREF(self->powers_func); self->powers_func = NULL; }
+#ifdef TRACE
+  fprintf(stderr, " = deleting block %p\n", block);
+#endif
+  destroy_implicit_blocks(block);
+  bcsr_free(&block->A_part);
+  _FREE_(block->V);
+  _FREE_(block->schedule);
+  _FREE_(block->perm);
+  PyObject_Del(block);
 }
 
-#define METHOD(name, flags) { #name, (PyCFunction)AkxObjectC_##name, flags },
-static PyMethodDef AkxObjectC_methods[] = {
-	{ "num_threadblocks", (PyCFunction)AkxObjectC_num_threadblocks, METH_NOARGS },
-	{ "num_blocks", (PyCFunction)AkxObjectC_num_blocks, METH_VARARGS },
-	{ "orig_tilesize", (PyCFunction)AkxObjectC_orig_tilesize, METH_VARARGS },
-	{ "threadblocks", (PyCFunction)AkxObjectC_threadblocks, METH_VARARGS },
-	{ "block_shape", (PyCFunction)AkxObjectC_block_shape, METH_VARARGS },
-	{ "block_nnzb", (PyCFunction)AkxObjectC_block_nnzb, METH_VARARGS },
-	{ "block_schedule", (PyCFunction)AkxObjectC_block_schedule, METH_VARARGS },
-	{ "block_nnzb_computed", (PyCFunction)AkxObjectC_block_nnzb_computed, METH_VARARGS },
-	{ "block_variant", (PyCFunction)AkxObjectC_block_variant, METH_VARARGS },
-	{ "block_tilecount", (PyCFunction)AkxObjectC_block_tilecount, METH_VARARGS },
-	{ "block_tile", (PyCFunction)AkxObjectC_block_tile, METH_VARARGS },
-	{ "block_split", (PyCFunction)AkxObjectC_block_split, METH_VARARGS },
-	{ "block_symm_opt", (PyCFunction)AkxObjectC_block_symm_opt, METH_VARARGS },
-	{ "explicitblocks", (PyCFunction)AkxObjectC_explicitblocks, METH_NOARGS },
-	{ "implicitblocks", (PyCFunction)AkxObjectC_implicitblocks, METH_VARARGS },
-	{ "block_index_comp", (PyCFunction)AkxObjectC_block_index_comp, METH_VARARGS },
-	{ "powers", (PyCFunction)AkxObjectC_powers, METH_VARARGS },
-	{ NULL, NULL, 0, NULL }
+#define METHOD(name, flags) { #name, (PyCFunction)AkxBlock_##name, flags },
+static PyMethodDef AkxBlock_methods[] = {
+  METHOD(shape, METH_VARARGS)
+  METHOD(nnzb, METH_VARARGS)
+  METHOD(schedule, METH_VARARGS)
+  METHOD(nnzb_computed, METH_VARARGS)
+  METHOD(variant, METH_VARARGS)
+  METHOD(tilecount, METH_VARARGS)
+  METHOD(tile, METH_VARARGS)
+  METHOD(partition, METH_VARARGS)
+  METHOD(split, METH_VARARGS)
+  METHOD(symm_opt, METH_VARARGS)
+  METHOD(implicitblocks, METH_VARARGS)
+  METHOD(index_comp, METH_VARARGS)
+  { NULL, NULL, 0, NULL }
 };
 #undef METHOD
 
-static PyTypeObject AkxObjectC_Type = {
+static PyTypeObject AkxBlock_Type = {
 	PyObject_HEAD_INIT(NULL)
 	0,                          /*tp_size*/
-	"AkxObjectC",               /*tp_name*/
-	sizeof(AkxObjectC),         /*tp_basicsize*/
+	"AkxBlock",                 /*tp_name*/
+	sizeof(AkxBlock),           /*tp_basicsize*/
 	0,                          /*tp_itemsize*/
 	/* methods */
-	(destructor)AkxObjectC_dealloc,     /*tp_dealloc*/
+	(destructor)AkxBlock_dealloc,     /*tp_dealloc*/
 	0,                          /*tp_print*/
 	0,                          /*tp_getattr*/
 	0,                          /*tp_setattr*/
@@ -1570,7 +1272,7 @@ static PyTypeObject AkxObjectC_Type = {
 	0,                          /*tp_weaklistoffset*/
 	0,                          /*tp_iter*/
 	0,                          /*tp_iternext*/
-	AkxObjectC_methods,         /*tp_methods*/
+	AkxBlock_methods,           /*tp_methods*/
 	0,                          /*tp_members*/
 	0,                          /*tp_getset*/
 	0,                          /*tp_base*/
@@ -1580,10 +1282,12 @@ static PyTypeObject AkxObjectC_Type = {
 	0,                          /*tp_dictoffset*/
 	0,                          /*tp_init*/
 	0,                          /*tp_alloc*/
-	AkxObjectC_new,             /*tp_new*/
+	0,/*AkxBlock_new,*/         /*tp_new*/
 };
 
 static PyMethodDef methods[] = {
+	{ "tb_partition", Akx_tb_partition, METH_VARARGS },
+	{ "threadblocks", Akx_threadblocks, METH_VARARGS },
 	{ NULL, NULL, 0, NULL }
 };
 
@@ -1594,11 +1298,11 @@ init_akx_static(void)
   if (!module)
     return;
 
-  if (PyType_Ready(&AkxObjectC_Type) < 0)
+  if (PyType_Ready(&AkxBlock_Type) < 0)
     return;
 
-  Py_INCREF(&AkxObjectC_Type);
-  PyModule_AddObject(module, "AkxObjectC", (PyObject *)&AkxObjectC_Type);
+  Py_INCREF(&AkxBlock_Type);
+  PyModule_AddObject(module, "AkxBlock", (PyObject *)&AkxBlock_Type);
 
   import_array();
 }

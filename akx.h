@@ -63,13 +63,6 @@ struct hypergraph
 	index_t *__restrict__ pins;
 };
 
-struct net
-{
-	index_t n_pins;
-	index_t frontier;
-	index_t *__restrict__ pins;
-};
-
 struct set
 {
 	index_t capacity;
@@ -88,26 +81,24 @@ struct level_net
 
 struct partition_data
 {
-	index_t n;
-	part_id_t n_parts;
-	part_id_t *row_to_part;
 	index_t *part_to_row;
-	index_t *row_to_part_row;
 	index_t *ptr;
 };
 
-struct akx_explicit_block
+typedef struct
 {
+	PyObject_HEAD
 	level_t k;
+
 	struct bcsr_t A_part;
 	index_t V_size;
 	value_t *__restrict__ V;
-	index_t size;
 	index_t *__restrict__ schedule; // how many rows to process for each level
 	                                // (number of rows, not number of row tiles)
+	index_t perm_size;
 	index_t *__restrict__ perm;
 
-	int symmetric_opt; // if 1, only upper triangle is stored
+	flag_t symmetric_opt; // if 1, only upper triangle is stored
 	part_id_t implicit_blocks; // 0 = no implicit cache blocking
 	index_t *__restrict__ level_start;
 	union {
@@ -118,45 +109,27 @@ struct akx_explicit_block
 	flag_t browptr_comp;
 	flag_t bcolidx_comp;
 	flag_t computation_seq_comp;
-};
-
-struct akx_thread_block
-{
-	struct akx_explicit_block orig_eb;
-
-	part_id_t explicit_blocks;
-	struct akx_explicit_block *eb;
-};
+} AkxBlock;
 
 struct akx_data
 {
-	value_t * V_global;
+	level_t k;
+	value_t *V_global;
 	index_t V_global_m;
 	struct akx_thread_block *__restrict__ thread_block;
+	part_id_t nblocks;
+	AkxBlock **blocks;
 	level_t steps;
 	value_t *__restrict__ coeffs;
 };
 
-void dest_hypergraph ( struct hypergraph* );
-struct level_net *compute_closure ( const struct bcsr_t*, level_t );
-void nets_to_netlist ( const struct level_net*, index_t, struct hypergraph* );
-void compute_partition ( struct hypergraph*, part_id_t, struct partition_data* );
-struct akx_thread_block *make_thread_blocks ( const struct bcsr_t*, const struct partition_data*, level_t );
-void destroy_thread_blocks ( struct akx_thread_block*, part_id_t );
-void dest_partition_data ( struct partition_data*);
-void print_sp_matrix (const struct bcsr_t*, index_t);
-
 typedef struct {
-	PyObject_HEAD
-	PyArrayObject *indptr;
-	PyArrayObject *indices;
-	PyArrayObject *data;
-	struct bcsr_t A;
-
-	part_id_t thread_blocks;
-	struct akx_thread_block *__restrict__ tb;
-
-	PyObject *powers_func;
+  PyObject_HEAD
+  level_t k;
+  index_t matrix_size;
+  int nthreads;
+  AkxBlock **blocks;
+  int *thread_offset;
 } AkxObjectC;
 
 #endif

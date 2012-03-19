@@ -278,7 +278,6 @@ struct bcsr_funcs {
 void * do_akx ( void *__restrict__ input )
 {
   struct akx_data *data = (struct akx_data*) input;
-  struct akx_thread_block *__restrict__ tb = data->thread_block;
 
   level_t glevel = 0;
   while (glevel < data->steps)
@@ -286,26 +285,22 @@ void * do_akx ( void *__restrict__ input )
     // On the last iteration, we may do fewer than k steps.
     // To minimize redundancy, we should do the later levels, [k-#steps, k),
     // rather than the earlier levels, [0, #steps).
-    level_t start = tb->orig_eb.k - (data->steps - glevel);
+    level_t start = data->k - (data->steps - glevel);
     if (start < 0)
       start = 0;
     glevel -= start;
 
     part_id_t block;
-    for (block = 0; block < tb->explicit_blocks; block++) {
-      struct akx_explicit_block *eb = &tb->eb[block];
+    for (block = 0; block < data->nblocks; block++) {
+      AkxBlock *__restrict__ eb = data->blocks[block];
 #define V_LOCAL(l)  (&eb->V[(l)*eb->V_size])
 #define V_GLOBAL(l) (&data->V_global[(glevel+(l))*data->V_global_m])
       index_t i;
       // copy vector to local data using perm
-      value_t *local = V_LOCAL(start);
-      value_t *global = V_GLOBAL(start);
-      for (i = 0; i < eb->size / ${orig_b_n}; ++i)
-      {
-%       for j in xrange(orig_b_n):
-          local[i*${orig_b_n} + ${j}] = global[eb->perm[i]*${orig_b_n} + ${j}];
-%       endfor
-      }
+      value_t *__restrict__ local = V_LOCAL(start);
+      value_t *__restrict__ global = V_GLOBAL(start);
+      for (i = 0; i < eb->perm_size; ++i)
+        local[i] = global[eb->perm[i]];
 
       struct bcsr_funcs *bf = bcsr_funcs_table;
       while (bf->b_m != eb->A_part.b_m ||
@@ -352,12 +347,8 @@ void * do_akx ( void *__restrict__ input )
           // copy vector to global data using perm
           local = V_LOCAL(l+1);
           global = V_GLOBAL(l+1);
-          for (i = 0; i < eb->schedule[eb->k-1] / ${orig_b_m}; ++i)
-          {
-%           for j in xrange(orig_b_m):
-              global[eb->perm[i]*${orig_b_m} + ${j}] = local[i*${orig_b_m} + ${j}];
-%           endfor
-          }
+          for (i = 0; i < eb->schedule[eb->k-1]; ++i)
+            global[eb->perm[i]] = local[i];
         }
       }
       else
@@ -386,12 +377,8 @@ void * do_akx ( void *__restrict__ input )
           // copy vector to global data using perm
           local = V_LOCAL(l+1);
           global = V_GLOBAL(l+1);
-          for (i = 0; i < eb->schedule[eb->k-1] / ${orig_b_m}; ++i)
-          {
-%           for j in xrange(orig_b_m):
-              global[eb->perm[i]*${orig_b_m} + ${j}] = local[i*${orig_b_m} + ${j}];
-%           endfor
-          }
+          for (i = 0; i < eb->schedule[eb->k-1]; ++i)
+            global[eb->perm[i]] = local[i];
         }
       }
 #undef V_GLOBAL
@@ -403,28 +390,27 @@ void * do_akx ( void *__restrict__ input )
 #else
     pthread_barrier_wait(&barrier);
 #endif
-    glevel += tb->orig_eb.k;
+    glevel += data->k;
   }
 
   return NULL;
 }
 
 static PyObject *
-AkxPowers_powers(PyObject *self, PyObject *args)
+AkxObjectC_powers(AkxObjectC *akxobj, PyObject *args)
 {
-  AkxObjectC *akxobj;
 %if usecoeffs:
   PyArrayObject *vecs, *coeffs;
-  if (!PyArg_ParseTuple(args, "OO!O!", &akxobj, &PyArray_Type, &vecs, &PyArray_Type, &coeffs))
+  if (!PyArg_ParseTuple(args, "O!O!", &PyArray_Type, &vecs, &PyArray_Type, &coeffs))
     return NULL;
 %else:
   PyArrayObject *vecs;
-  if (!PyArg_ParseTuple(args, "OO!", &akxobj, &PyArray_Type, &vecs, &PyArray_Type))
+  if (!PyArg_ParseTuple(args, "O!", &PyArray_Type, &vecs, &PyArray_Type))
     return NULL;
 %endif
 
   if (vecs->nd != 2
-      || vecs->dimensions[1] != akxobj->A.mb * akxobj->A.b_m
+      || vecs->dimensions[1] != akxobj->matrix_size
       || vecs->strides[1] != sizeof(value_t))
   {
     PyErr_SetString(PyExc_ValueError, "vector array has wrong shape");
@@ -441,34 +427,17 @@ AkxPowers_powers(PyObject *self, PyObject *args)
   }
 %endif
 
-  if (akxobj->thread_blocks == 0)
-  {
-    PyErr_SetString(PyExc_ValueError, "thread blocks not yet created");
-    return NULL;
-  }
-
-#ifndef _OPENMP
-#ifdef TRACE
-  fprintf (stderr, "== initializing thread data ...\n");
-#endif
-
-  // TODO: Initialize pthreads
-  pthread_attr_t attr;
-  P( pthread_attr_init( &attr ) );
-  P( pthread_barrier_init( &barrier, NULL, akxobj->thread_blocks ) );
-
-  pthread_t *threads = _ALLOC_ (akxobj->thread_blocks * sizeof (pthread_t));
-#endif
-    
-  struct akx_data *td = _ALLOC_ (akxobj->thread_blocks * sizeof (struct akx_data));
+  struct akx_data *td = _ALLOC_ (akxobj->nthreads * sizeof (struct akx_data));
 
   part_id_t pp;
-  for (pp = 0; pp < akxobj->thread_blocks; ++pp)
+  for (pp = 0; pp < akxobj->nthreads; ++pp)
   {
     // TODO: sched. affinity stuff
+    td[pp].k = akxobj->k;
     td[pp].V_global = (value_t *)vecs->data;
     td[pp].V_global_m = vecs->strides[0] / sizeof(value_t);
-    td[pp].thread_block = &akxobj->tb[pp];
+    td[pp].nblocks = akxobj->thread_offset[pp+1] - akxobj->thread_offset[pp];
+    td[pp].blocks = &akxobj->blocks[akxobj->thread_offset[pp]];
     td[pp].steps = vecs->dimensions[0] - 1;
 %if usecoeffs:
     td[pp].coeffs = (value_t *)coeffs->data;
@@ -476,31 +445,142 @@ AkxPowers_powers(PyObject *self, PyObject *args)
   }
 
 #ifdef _OPENMP
-  omp_set_num_threads(akxobj->thread_blocks);
+  omp_set_num_threads(akxobj->nthreads);
   #pragma omp parallel
   {
     do_akx(&td[omp_get_thread_num()]);
   }
 #else
-  for (pp = 1; pp < akxobj->thread_blocks; ++pp)
+  pthread_attr_t attr;
+  P( pthread_attr_init( &attr ) );
+  P( pthread_barrier_init( &barrier, NULL, akxobj->nthreads ) );
+  pthread_t *threads = _ALLOC_ (akxobj->nthreads * sizeof (pthread_t));
+
+  for (pp = 1; pp < akxobj->nthreads; ++pp)
     P( pthread_create( &threads[pp], &attr, &do_akx, (void*) &td[pp] ) );
 
   do_akx (&td[0]);
 
-  for( pp = 1; pp < akxobj->thread_blocks; ++pp ) 
+  for( pp = 1; pp < akxobj->nthreads; ++pp ) 
     P( pthread_join( threads[pp], NULL ) );
 
+  _FREE_ (threads);
   P( pthread_barrier_destroy( &barrier ) );
   P( pthread_attr_destroy( &attr ) );
-  _FREE_ (threads);
 #endif
 
   _FREE_ ((void*) td );
   Py_RETURN_NONE;
 }
 
+static PyObject *
+AkxObjectC_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds)
+{
+  // Note: this does not do proper error checking (and can't; we don't have
+  // access to &AkxBlock_Type here as we would need to prevent arbitrary
+  // objects from getting passed off as blocks).
+  // We rely on the Python code to ensure parameters are sane.
+
+  int k, matrix_size;
+  PyObject *list;
+  if (!PyArg_ParseTuple(args, "iiO", &k, &matrix_size, &list))
+    return NULL;
+
+  AkxObjectC *self = PyObject_New(AkxObjectC, subtype);
+  if (!self)
+    return NULL;
+
+  self->k = k;
+  self->matrix_size = matrix_size;
+
+  self->nthreads = Py_SIZE(list);
+  self->thread_offset = _ALLOC_((self->nthreads + 1) * sizeof(part_id_t));
+  part_id_t total_blocks = 0;
+  part_id_t thread;
+  for (thread = 0; thread < self->nthreads; thread++)
+  {
+    self->thread_offset[thread] = total_blocks;
+    total_blocks += PyList_GET_SIZE(PyList_GET_ITEM(list, thread));
+  }
+  self->thread_offset[thread] = total_blocks;
+
+  self->blocks = _ALLOC_(total_blocks * sizeof(AkxBlock *));
+  for (thread = 0; thread < self->nthreads; thread++)
+  {
+    PyObject *sublist = PyList_GET_ITEM(list, thread);
+    part_id_t j;
+    for (j = 0; j < PyList_GET_SIZE(sublist); j++)
+    {
+      AkxBlock *block = (AkxBlock *)PyList_GET_ITEM(sublist, j);
+      Py_INCREF(block);
+      assert(block->k == k);
+      self->blocks[self->thread_offset[thread] + j] = block;
+    }
+  }
+  
+  return (PyObject *)self;
+}
+
+static void
+AkxObjectC_dealloc(AkxObjectC *akxobj)
+{
+  index_t i;
+  for (i = 0; i < akxobj->thread_offset[akxobj->nthreads]; i++)
+    Py_DECREF(akxobj->blocks[i]);
+  PyObject_Del(akxobj);
+}
+
+#define METHOD(name, flags) { #name, (PyCFunction)AkxObjectC_##name, flags },
+static PyMethodDef AkxObjectC_methods[] = {
+  METHOD(powers, METH_VARARGS)
+  { NULL, NULL, 0, NULL }
+};
+#undef METHOD
+
+static PyTypeObject AkxObjectC_Type = {
+	PyObject_HEAD_INIT(NULL)
+	0,                          /*tp_size*/
+	"AkxObjectC",               /*tp_name*/
+	sizeof(AkxObjectC),         /*tp_basicsize*/
+	0,                          /*tp_itemsize*/
+	/* methods */
+	(destructor)AkxObjectC_dealloc,     /*tp_dealloc*/
+	0,                          /*tp_print*/
+	0,                          /*tp_getattr*/
+	0,                          /*tp_setattr*/
+	0,                          /*tp_compare*/
+	0,                          /*tp_repr*/
+	0,                          /*tp_as_number*/
+	0,                          /*tp_as_sequence*/
+	0,                          /*tp_as_mapping*/
+	0,                          /*tp_hash*/
+	0,                          /*tp_call*/
+	0,                          /*tp_str*/
+	0,                          /*tp_getattro*/
+	0,                          /*tp_setattro*/
+	0,                          /*tp_as_buffer*/
+	Py_TPFLAGS_DEFAULT,         /*tp_flags*/
+	0,                          /*tp_doc*/
+	0,                          /*tp_traverse*/
+	0,                          /*tp_clear*/
+	0,                          /*tp_richcompare*/
+	0,                          /*tp_weaklistoffset*/
+	0,                          /*tp_iter*/
+	0,                          /*tp_iternext*/
+	AkxObjectC_methods,          /*tp_methods*/
+	0,                          /*tp_members*/
+	0,                          /*tp_getset*/
+	0,                          /*tp_base*/
+	0,                          /*tp_dict*/
+	0,                          /*tp_descr_get*/
+	0,                          /*tp_descr_set*/
+	0,                          /*tp_dictoffset*/
+	0,                          /*tp_init*/
+	0,                          /*tp_alloc*/
+	AkxObjectC_new,              /*tp_new*/
+};
+
 static PyMethodDef methods[] = {
-	{ "powers", AkxPowers_powers, METH_VARARGS },
 	{ NULL, NULL, 0, NULL }
 };
 
@@ -510,6 +590,12 @@ init_akx_powers(void)
   PyObject *module = Py_InitModule("_akx_powers", methods);
   if (!module)
     return;
+
+  if (PyType_Ready(&AkxObjectC_Type) < 0)
+    return;
+
+  Py_INCREF(&AkxObjectC_Type);
+  PyModule_AddObject(module, "AkxObjectC", (PyObject *)&AkxObjectC_Type);
 
   import_array();
 }
