@@ -493,7 +493,7 @@ AkxObjectC_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds)
   self->k = k;
   self->matrix_size = matrix_size;
 
-  self->nthreads = Py_SIZE(list);
+  self->nthreads = PyList_GET_SIZE(list);
   self->thread_offset = _ALLOC_((self->nthreads + 1) * sizeof(part_id_t));
   part_id_t total_blocks = 0;
   part_id_t thread;

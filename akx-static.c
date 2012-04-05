@@ -1,5 +1,5 @@
 #undef NDEBUG // for assertions
-#define TRACE
+//#define TRACE
 #include <Python.h>
 #include <numpy/arrayobject.h>
 
@@ -515,6 +515,10 @@ void make_implicit_blocks (
   A_temp.browptr[i] = n;
   A_temp.nnzb = n;
 
+  struct bcsr_t AT_temp;
+  if (this_block->symmetric_opt)
+    bcsr_structure_transpose(&AT_temp, &A_temp, A_temp.mb);
+
   i = 0;
   for (block = 0; block < nblocks; block++)
   {
@@ -524,12 +528,9 @@ void make_implicit_blocks (
     {
       // Computation of row i at level l+1 depends on computation of row j at level l
       // iff i and j share any element in common, so build net of A^T * A
-      struct bcsr_t AT_temp;
-      bcsr_structure_transpose(&AT_temp, &A_temp, A_temp.mb);
       build_net_2x(&A_temp, &AT_temp, &cbn, k,
                    cbp->ptr[block + 1] - cbp->ptr[block], &cbp->part_to_row[cbp->ptr[block]],
                    workspace);
-      bcsr_free(&AT_temp);
       //printf("[symm] block %d expands from %d to %d\n", block, cbn.levels[1], cbn.levels[k]);
     }
     else
@@ -583,6 +584,9 @@ void make_implicit_blocks (
     _FREE_ (cbn.levels);
     _FREE_ (cbn.pins);
   }
+
+  if (this_block->symmetric_opt)
+    bcsr_free(&AT_temp);
 
   _FREE_ (A_temp.browptr);
   _FREE_ (A_temp.bcolidx);
@@ -675,7 +679,7 @@ int make_partition_data(struct partition_data *p, PyObject *partition, index_t r
     int *row_to_part = PyArray_DATA(parray);
     if (PyArray_DIM(parray, 0) != rows)
     {
-      PyErr_Format(PyExc_IndexError, "partition array has wrong size, got %d expected %d", PyArray_DIM(parray, 0), rows);
+      PyErr_Format(PyExc_IndexError, "partition array has wrong size, got %d expected %d", (int)PyArray_DIM(parray, 0), rows);
       goto fail;
     }
 
@@ -732,8 +736,10 @@ Akx_tb_partition(PyObject *self, PyObject *args)
   struct bcsr_t A;
   matrix_from_arrays(&A, indptr, indices, data);
 
-  PyObject *partition = PyArray_SimpleNew(1, &A.mb, NPY_INT);
-  PyObject *sizes = PyArray_SimpleNew(1, &n_parts, NPY_INT);
+  npy_intp dim = A.mb;
+  PyObject *partition = PyArray_SimpleNew(1, &dim, NPY_INT);
+  dim = n_parts;
+  PyObject *sizes = PyArray_SimpleNew(1, &dim, NPY_INT);
   count_t cut;
   partition_matrix_hypergraph(&A, A.mb, k, n_parts, PyArray_DATA(partition), PyArray_DATA(sizes), &cut);
 
@@ -1038,8 +1044,10 @@ AkxBlock_partition(AkxBlock *block, PyObject *args)
   index_t b_m = block->A_part.b_m;
   index_t rows = (block->schedule[block->k-1] + b_m - 1) / b_m; // Non-ghost entries only
 
-  PyObject *partition = PyArray_SimpleNew(1, &rows, NPY_INT);
-  PyObject *sizes = PyArray_SimpleNew(1, &n_parts, NPY_INT);
+  npy_intp dim = rows;
+  PyObject *partition = PyArray_SimpleNew(1, &dim, NPY_INT);
+  dim = n_parts;
+  PyObject *sizes = PyArray_SimpleNew(1, &dim, NPY_INT);
   count_t cut;
   partition_matrix_hypergraph(&block->A_part, rows, block->k, n_parts, PyArray_DATA(partition), PyArray_DATA(sizes), &cut);
 
