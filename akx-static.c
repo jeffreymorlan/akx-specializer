@@ -379,9 +379,6 @@ void build_explicit_block(
   //	this_block->A_part->b_n);
   A_part->browptr = _ALLOC_ ((A_part->mb + 1) * sizeof (index_t));
 
-  this_block->V_size = A_part->nb * A_part->b_n;
-  this_block->V = _ALLOC_ ((k+1)*this_block->V_size * sizeof (value_t));
-
   // Count nnz and identify permutation
   A_part->nnzb = 0;
   for (i = n.levels[0]; i < n.levels[k]; ++i)
@@ -721,6 +718,8 @@ void dest_partition_data ( struct partition_data * p )
   _FREE_ (p->ptr);
 }
 
+PyDoc_STRVAR(tb_partition_doc,
+"tb_partition(indptr, indices, data, k, n_parts)");
 static PyObject *
 Akx_tb_partition(PyObject *self, PyObject *args)
 {
@@ -746,6 +745,12 @@ Akx_tb_partition(PyObject *self, PyObject *args)
   return Py_BuildValue("OOi", partition, sizes, cut);
 }
 
+PyDoc_STRVAR(threadblocks_doc,
+"threadblocks(indptr, indices, data, k, n_parts, partition)\n\
+\n\
+Splits the matrix into n_parts thread blocks, optionally using the\n\
+provided partitioning. Returns a list of AkxBlock objects, one\n\
+representing each thread block.");
 static PyObject *
 Akx_threadblocks(PyObject *self, PyObject *args)
 {
@@ -795,6 +800,8 @@ Akx_threadblocks(PyObject *self, PyObject *args)
   return ret;
 }
 
+PyDoc_STRVAR(shape_doc,
+"block.shape() -> size of block as a (height, width) tuple");
 static PyObject *
 AkxBlock_shape(AkxBlock *block, PyObject *args)
 {
@@ -802,12 +809,16 @@ AkxBlock_shape(AkxBlock *block, PyObject *args)
   return Py_BuildValue("ii", A->mb * A->b_m, A->nb * A->b_n);
 }
 
+PyDoc_STRVAR(nnzb_doc,
+"block.nnzb() -> number of nonzero tiles in block");
 static PyObject *
 AkxBlock_nnzb(AkxBlock *block, PyObject *args)
 {
   return PyInt_FromLong(block->A_part.nnzb);
 }
 
+PyDoc_STRVAR(schedule_doc,
+"block.schedule() -> array of number of rows used in each level (k integers)");
 static PyObject *
 AkxBlock_schedule(AkxBlock *block, PyObject *args)
 {
@@ -818,6 +829,8 @@ AkxBlock_schedule(AkxBlock *block, PyObject *args)
   return obj;
 }
 
+PyDoc_STRVAR(nnzb_computed_doc,
+"block.nnzb_computed() -> total number of nonzero tiles read for a powers operation");
 static PyObject *
 AkxBlock_nnzb_computed(AkxBlock *block, PyObject *args)
 {
@@ -828,6 +841,8 @@ AkxBlock_nnzb_computed(AkxBlock *block, PyObject *args)
   return PyInt_FromLong(nnz);
 }
 
+PyDoc_STRVAR(variant_doc,
+"block.variant() -> TODO");
 static PyObject *
 AkxBlock_variant(AkxBlock *block, PyObject *args)
 {
@@ -835,6 +850,8 @@ AkxBlock_variant(AkxBlock *block, PyObject *args)
   return Py_BuildValue("iiiii", A->b_m, A->b_n, A->b_transpose, block->browptr_comp, block->bcolidx_comp);
 }
 
+PyDoc_STRVAR(tilecount_doc,
+"block.tilecount(b_m, b_n, samples) -> estimate number of nonzero tiles after tiling");
 static PyObject *
 AkxBlock_tilecount(AkxBlock *block, PyObject *args)
 {
@@ -884,6 +901,8 @@ AkxBlock_tilecount(AkxBlock *block, PyObject *args)
 
 #define MAX_TILE_HEIGHT 16
 
+PyDoc_STRVAR(tile_doc,
+"block.tile(b_m, b_n, b_transpose) -> tile block");
 static PyObject *
 AkxBlock_tile(AkxBlock *block, PyObject *args)
 {
@@ -1023,17 +1042,11 @@ AkxBlock_tile(AkxBlock *block, PyObject *args)
   newblock->bcolidx_comp = 0;
   newblock->computation_seq_comp = 0;
 
-  // Expand V to accommodate padding
-  index_t padded_height = Anew.mb * Anew.b_m;
-  index_t padded_width = Anew.nb * Anew.b_n;
-  newblock->V_size = (padded_height > padded_width ? padded_height : padded_width);
-  newblock->V = _ALLOC_ ((newblock->k+1) * newblock->V_size * sizeof (value_t));
-  // Don't let evil stuff like Inf/NaN sneak into the padding by chance
-  memset(newblock->V, 0, (newblock->k+1) * newblock->V_size * sizeof (value_t));
-
   return (PyObject *)newblock;
 }
 
+PyDoc_STRVAR(partition_doc,
+"block.partition(n_parts) -> partitioning");
 static PyObject *
 AkxBlock_partition(AkxBlock *block, PyObject *args)
 {
@@ -1054,6 +1067,8 @@ AkxBlock_partition(AkxBlock *block, PyObject *args)
   return Py_BuildValue("OOi", partition, sizes, cut);
 }
 
+PyDoc_STRVAR(split_doc,
+"block.split(n_parts, partition) -> list of blocks");
 static PyObject *
 AkxBlock_split(AkxBlock *block, PyObject *args)
 {
@@ -1111,6 +1126,8 @@ AkxBlock_split(AkxBlock *block, PyObject *args)
   return ret;
 }
 
+PyDoc_STRVAR(symm_opt_doc,
+"block.symm_opt()");
 static PyObject *
 AkxBlock_symm_opt(AkxBlock *block, PyObject *args)
 {
@@ -1141,6 +1158,8 @@ AkxBlock_symm_opt(AkxBlock *block, PyObject *args)
   Py_RETURN_NONE;
 }
 
+PyDoc_STRVAR(implicitblocks_doc,
+"block.implicitblocks([n_parts, partition, stanza])");
 static PyObject *
 AkxBlock_implicitblocks(AkxBlock *block, PyObject *args)
 {
@@ -1188,6 +1207,8 @@ index_comp(index_t *array, size_t size)
   return out;
 }
 
+PyDoc_STRVAR(index_comp_doc,
+"block.index_comp()");
 static PyObject *
 AkxBlock_index_comp(AkxBlock *block, PyObject *args)
 {
@@ -1226,13 +1247,12 @@ AkxBlock_dealloc(AkxBlock *block)
 #endif
   destroy_implicit_blocks(block);
   bcsr_free(&block->A_part);
-  _FREE_(block->V);
   _FREE_(block->schedule);
   _FREE_(block->perm);
   PyObject_Del(block);
 }
 
-#define METHOD(name, flags) { #name, (PyCFunction)AkxBlock_##name, flags },
+#define METHOD(name, flags) { #name, (PyCFunction)AkxBlock_##name, flags, name##_doc },
 static PyMethodDef AkxBlock_methods[] = {
   METHOD(shape, METH_VARARGS)
   METHOD(nnzb, METH_VARARGS)
@@ -1250,6 +1270,8 @@ static PyMethodDef AkxBlock_methods[] = {
 };
 #undef METHOD
 
+PyDoc_STRVAR(AkxBlock_doc,
+"AkxBlock documentation here. TODO");
 static PyTypeObject AkxBlock_Type = {
 	PyObject_HEAD_INIT(NULL)
 	0,                          /*tp_size*/
@@ -1273,7 +1295,7 @@ static PyTypeObject AkxBlock_Type = {
 	0,                          /*tp_setattro*/
 	0,                          /*tp_as_buffer*/
 	Py_TPFLAGS_DEFAULT,         /*tp_flags*/
-	0,                          /*tp_doc*/
+	AkxBlock_doc,               /*tp_doc*/
 	0,                          /*tp_traverse*/
 	0,                          /*tp_clear*/
 	0,                          /*tp_richcompare*/
@@ -1294,15 +1316,17 @@ static PyTypeObject AkxBlock_Type = {
 };
 
 static PyMethodDef methods[] = {
-	{ "tb_partition", Akx_tb_partition, METH_VARARGS },
-	{ "threadblocks", Akx_threadblocks, METH_VARARGS },
+	{ "tb_partition", Akx_tb_partition, METH_VARARGS, tb_partition_doc },
+	{ "threadblocks", Akx_threadblocks, METH_VARARGS, threadblocks_doc },
 	{ NULL, NULL, 0, NULL }
 };
 
+PyDoc_STRVAR(module_doc,
+"akx-static documentation here. TODO");
 PyMODINIT_FUNC
 init_akx_static(void)
 {
-  PyObject *module = Py_InitModule("_akx_static", methods);
+  PyObject *module = Py_InitModule3("_akx_static", methods, module_doc);
   if (!module)
     return;
 

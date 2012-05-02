@@ -91,14 +91,14 @@ typedef struct
 	level_t k;
 
 	struct bcsr_t A_part;
-	index_t V_size;
-	value_t *__restrict__ V;
+	flag_t browptr_comp;
+	flag_t bcolidx_comp;
+	flag_t symmetric_opt; // if 1, only upper triangle is stored
 	index_t *__restrict__ schedule; // how many rows to process for each level
 	                                // (number of rows, not number of row tiles)
 	index_t perm_size;
 	index_t *__restrict__ perm;
 
-	flag_t symmetric_opt; // if 1, only upper triangle is stored
 	part_id_t implicit_blocks; // 0 = no implicit cache blocking
 	index_t *__restrict__ level_start;
 	union {
@@ -106,19 +106,24 @@ typedef struct
 		uint16_t *__restrict__ computation_seq16;
 	};
 	int implicit_stanza; // 1 if computation_seq is stanza encoded, 0 if not
-	flag_t browptr_comp;
-	flag_t bcolidx_comp;
 	flag_t computation_seq_comp;
 } AkxBlock;
+
+
+struct akx_task
+{
+  AkxBlock *block;
+  index_t V_size;
+  value_t *__restrict__ V;
+};
 
 struct akx_data
 {
 	level_t k;
 	value_t *V_global;
 	index_t V_global_m;
-	struct akx_thread_block *__restrict__ thread_block;
 	part_id_t nblocks;
-	AkxBlock **blocks;
+	struct akx_task *blocks;
 	level_t steps;
 	value_t *__restrict__ coeffs;
 };
@@ -128,7 +133,7 @@ typedef struct {
   level_t k;
   index_t matrix_size;
   int nthreads;
-  AkxBlock **blocks;
+  struct akx_task *blocks;
   int *thread_offset;
 } AkxObjectC;
 

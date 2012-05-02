@@ -123,7 +123,8 @@ def tune(matrix, filename, k):
 	elif name == 'emerald':
 		possthread = (32,64)
 	else:
-		exit("unknown host")
+		#exit("unknown host")
+		possthread = (1,)
 
 	results = []
 	for nthreads in possthread:

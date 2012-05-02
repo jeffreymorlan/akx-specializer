@@ -292,8 +292,10 @@ void * do_akx ( void *__restrict__ input )
 
     part_id_t block;
     for (block = 0; block < data->nblocks; block++) {
-      AkxBlock *__restrict__ eb = data->blocks[block];
-#define V_LOCAL(l)  (&eb->V[(l)*eb->V_size])
+      AkxBlock *__restrict__ eb = data->blocks[block].block;
+      index_t V_size = data->blocks[block].V_size;
+      value_t *V = data->blocks[block].V;
+#define V_LOCAL(l)  (&V[(l)*V_size])
 #define V_GLOBAL(l) (&data->V_global[(glevel+(l))*data->V_global_m])
       index_t i;
       // copy vector to local data using perm
@@ -321,7 +323,7 @@ void * do_akx ( void *__restrict__ input )
         part_id_t block;
 
         if (eb->symmetric_opt)
-          memset(V_LOCAL(start+1), 0, sizeof(value_t) * eb->V_size * (eb->k - start));
+          memset(V_LOCAL(start+1), 0, sizeof(value_t) * V_size * (eb->k - start));
         for (block = 0; block < eb->implicit_blocks; block++)
         {
           for (l = start; l < eb->k; l++)
@@ -358,7 +360,7 @@ void * do_akx ( void *__restrict__ input )
         for (l = start; l < eb->k; ++l)
         {
           if (eb->symmetric_opt)
-            memset(V_LOCAL(l+1), 0, sizeof(value_t) * eb->V_size);
+            memset(V_LOCAL(l+1), 0, sizeof(value_t) * V_size);
           // Monomial basis:
           func(
             &eb->A_part,
@@ -504,7 +506,7 @@ AkxObjectC_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds)
   }
   self->thread_offset[thread] = total_blocks;
 
-  self->blocks = _ALLOC_(total_blocks * sizeof(AkxBlock *));
+  self->blocks = _ALLOC_(total_blocks * sizeof(struct akx_task));
   for (thread = 0; thread < self->nthreads; thread++)
   {
     PyObject *sublist = PyList_GET_ITEM(list, thread);
@@ -514,7 +516,18 @@ AkxObjectC_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds)
       AkxBlock *block = (AkxBlock *)PyList_GET_ITEM(sublist, j);
       Py_INCREF(block);
       assert(block->k == k);
-      self->blocks[self->thread_offset[thread] + j] = block;
+      self->blocks[self->thread_offset[thread] + j].block = block;
+
+      // Expand V to accommodate padding
+      index_t padded_height = block->A_part.mb * block->A_part.b_m;
+      index_t padded_width = block->A_part.nb * block->A_part.b_n;
+      index_t V_size = (padded_height > padded_width ? padded_height : padded_width);
+      value_t *V = _ALLOC_ ((block->k+1) * V_size * sizeof (value_t));
+      // Don't let evil stuff like Inf/NaN sneak into the padding by chance
+      memset(V, 0, (block->k+1) * V_size * sizeof (value_t));
+
+      self->blocks[self->thread_offset[thread] + j].V_size = V_size;
+      self->blocks[self->thread_offset[thread] + j].V = V;
     }
   }
   
@@ -526,7 +539,12 @@ AkxObjectC_dealloc(AkxObjectC *akxobj)
 {
   index_t i;
   for (i = 0; i < akxobj->thread_offset[akxobj->nthreads]; i++)
-    Py_DECREF(akxobj->blocks[i]);
+  {
+    Py_DECREF(akxobj->blocks[i].block);
+    _FREE_(akxobj->blocks[i].V);
+  }
+  _FREE_(akxobj->blocks);
+  _FREE_(akxobj->thread_offset);
   PyObject_Del(akxobj);
 }
 
