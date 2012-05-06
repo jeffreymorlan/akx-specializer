@@ -269,8 +269,11 @@ def _powers_cgen(k, matrix_size, blocks, usecoeffs=False):
 	variants = set()
 	for tb in blocks:
 		for block in tb:
-			# TODO: make sure type == AkxBlock
-			variants.add(block.variant())
+			# TODO: type checking
+			if type(block) == tuple:
+				variants.add(block[0].variant())
+			else:
+				variants.add(block.variant())
 	#print variants
 
 	# TODO: validate, make sure k, matrix size match

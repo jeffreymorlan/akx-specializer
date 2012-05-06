@@ -293,6 +293,7 @@ void * do_akx ( void *__restrict__ input )
     part_id_t block;
     for (block = 0; block < data->nblocks; block++) {
       AkxBlock *__restrict__ eb = data->blocks[block].block;
+      AkxImplicitSeq *__restrict__ imp = data->blocks[block].imp;
       index_t V_size = data->blocks[block].V_size;
       value_t *V = data->blocks[block].V;
 #define V_LOCAL(l)  (&V[(l)*V_size])
@@ -317,20 +318,20 @@ void * do_akx ( void *__restrict__ input )
       }
 
       level_t l;
-      if (eb->implicit_blocks)
+      if (imp)
       {
-        bcsr_func_implicit func = bf->funcs[eb->symmetric_opt].implicit[eb->implicit_stanza];
+        bcsr_func_implicit func = bf->funcs[eb->symmetric_opt].implicit[imp->stanza];
         part_id_t block;
 
         if (eb->symmetric_opt)
           memset(V_LOCAL(start+1), 0, sizeof(value_t) * V_size * (eb->k - start));
-        for (block = 0; block < eb->implicit_blocks; block++)
+        for (block = 0; block < imp->nblocks; block++)
         {
           for (l = start; l < eb->k; l++)
           {
             index_t mb = (eb->schedule[l] + eb->A_part.b_m - 1) / eb->A_part.b_m;
-            index_t lev_start = eb->level_start[block * eb->k + l];
-            index_t lev_end   = eb->level_start[block * eb->k + l + 1];
+            index_t lev_start = imp->level_start[block * eb->k + l];
+            index_t lev_end   = imp->level_start[block * eb->k + l + 1];
             //printf("thread %d block %d level %d (%d,%d)\n", pthread_self(), block, l, lev_start, lev_end);
             func(
               &eb->A_part,
@@ -340,7 +341,7 @@ void * do_akx ( void *__restrict__ input )
               data->coeffs[glevel + l],
 %endif
               mb,
-              &eb->computation_seq[lev_start],
+              &imp->computation_seq[lev_start],
               lev_end - lev_start);
           }
         }
@@ -513,21 +514,36 @@ AkxObjectC_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds)
     part_id_t j;
     for (j = 0; j < PyList_GET_SIZE(sublist); j++)
     {
-      AkxBlock *block = (AkxBlock *)PyList_GET_ITEM(sublist, j);
-      Py_INCREF(block);
+      struct akx_task *task = &self->blocks[self->thread_offset[thread] + j];
+
+      PyObject *item = PyList_GET_ITEM(sublist, j);
+      AkxBlock *block;
+      AkxImplicitSeq *imp = NULL;
+      if (PyTuple_CheckExact(item))
+      {
+        block = (AkxBlock *)PyTuple_GET_ITEM(item, 0);
+        Py_INCREF(block);
+        imp = (AkxImplicitSeq *)PyTuple_GET_ITEM(item, 1);
+        Py_INCREF(imp);
+      }
+      else
+      {
+        block = (AkxBlock *)item;
+        Py_INCREF(block);
+      }
+
       assert(block->k == k);
-      self->blocks[self->thread_offset[thread] + j].block = block;
+
+      task->block = block;
+      task->imp = imp;
 
       // Expand V to accommodate padding
       index_t padded_height = block->A_part.mb * block->A_part.b_m;
       index_t padded_width = block->A_part.nb * block->A_part.b_n;
-      index_t V_size = (padded_height > padded_width ? padded_height : padded_width);
-      value_t *V = _ALLOC_ ((block->k+1) * V_size * sizeof (value_t));
-      // Don't let evil stuff like Inf/NaN sneak into the padding by chance
-      memset(V, 0, (block->k+1) * V_size * sizeof (value_t));
-
-      self->blocks[self->thread_offset[thread] + j].V_size = V_size;
-      self->blocks[self->thread_offset[thread] + j].V = V;
+      task->V_size = (padded_height > padded_width ? padded_height : padded_width);
+      task->V = _ALLOC_ ((block->k+1) * task->V_size * sizeof (value_t));
+      // Don't let Inf/NaN sneak into the padding by chance
+      memset(task->V, 0, (block->k+1) * task->V_size * sizeof (value_t));
     }
   }
   
@@ -541,6 +557,7 @@ AkxObjectC_dealloc(AkxObjectC *akxobj)
   for (i = 0; i < akxobj->thread_offset[akxobj->nthreads]; i++)
   {
     Py_DECREF(akxobj->blocks[i].block);
+    Py_XDECREF(akxobj->blocks[i].imp);
     _FREE_(akxobj->blocks[i].V);
   }
   _FREE_(akxobj->blocks);

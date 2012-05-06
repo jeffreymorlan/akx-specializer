@@ -450,15 +450,14 @@ void build_explicit_block(
 
   _FREE_ (n.levels);
   this_block->symmetric_opt = 0;
-  this_block->implicit_blocks = 0;
   this_block->browptr_comp = 0;
   this_block->bcolidx_comp = 0;
-  this_block->computation_seq_comp = 0;
 
   _FREE_ (perm);
 }
 
 void make_implicit_blocks (
+    AkxImplicitSeq *__restrict__ imp,
     AkxBlock *__restrict__ this_block,
     struct set *workspace,
     struct partition_data *cbp,
@@ -472,16 +471,18 @@ void make_implicit_blocks (
 
   assert(this_block->A_part.b_m == this_block->A_part.b_n);
 
-  this_block->implicit_blocks = nblocks;
-  this_block->implicit_stanza = stanza;
+  imp->k = k;
+  imp->mb = this_block->A_part.mb;
+  imp->nblocks = nblocks;
+  imp->stanza = stanza;
 
   // Count number of computations done in this thread block,
   // and make room for worst-case computation sequence array
   i = 0;
   for (l = 0; l < k; l++)
     i += (this_block->schedule[l] + this_block->A_part.b_m - 1) / this_block->A_part.b_m;
-  this_block->level_start = _ALLOC_ ((nblocks * k + 1) * sizeof(index_t));
-  this_block->computation_seq = _ALLOC_ (i*2 * sizeof(index_t));
+  imp->level_start = _ALLOC_ ((nblocks * k + 1) * sizeof(index_t));
+  imp->computation_seq = _ALLOC_ (i*2 * sizeof(index_t));
 
   i = 0;
   part_id_t block;
@@ -544,7 +545,7 @@ void make_implicit_blocks (
       // even though register tiling can make it look like they're needed
       index_t limit = (this_block->schedule[l] + this_block->A_part.b_m - 1) / this_block->A_part.b_m;
 
-      this_block->level_start[block*k+l] = i;
+      imp->level_start[block*k+l] = i;
       if (stanza)
       {
         // Stanza encoding - array of (start, end) pairs
@@ -556,10 +557,10 @@ void make_implicit_blocks (
           {
             if (localindex != next)
             {
-              this_block->computation_seq[i++] = localindex;
-              this_block->computation_seq[i++] = localindex;
+              imp->computation_seq[i++] = localindex;
+              imp->computation_seq[i++] = localindex;
             }
-            this_block->computation_seq[i-1]++;
+            imp->computation_seq[i-1]++;
             next = localindex + 1;
             computed_level[localindex]++;
           }
@@ -572,7 +573,7 @@ void make_implicit_blocks (
           index_t localindex = cbn.pins[j];
           if (localindex < limit && computed_level[localindex] == l)
           {
-            this_block->computation_seq[i++] = localindex;
+            imp->computation_seq[i++] = localindex;
             computed_level[localindex]++;
           }
         }
@@ -584,22 +585,10 @@ void make_implicit_blocks (
 
   if (this_block->symmetric_opt)
     bcsr_free(&AT_temp);
+  bcsr_free(&A_temp);
 
-  _FREE_ (A_temp.browptr);
-  _FREE_ (A_temp.bcolidx);
-
-  this_block->level_start[nblocks*k] = i;
+  imp->level_start[nblocks*k] = i;
   _FREE_ (computed_level);
-}
-
-void destroy_implicit_blocks (AkxBlock *__restrict__ block)
-{
-  if (block->implicit_blocks)
-  {
-    _FREE_ (block->level_start);
-    _FREE_ (block->computation_seq);
-    block->implicit_blocks = 0;
-  }
 }
 
 void print_sp_matrix (const struct bcsr_t *A, index_t max_brow)
@@ -629,6 +618,7 @@ void print_sp_matrix (const struct bcsr_t *A, index_t max_brow)
 }
 
 static PyTypeObject AkxBlock_Type;
+static PyTypeObject AkxImplicitSeq_Type;
 
 void matrix_from_arrays(struct bcsr_t *A, PyArrayObject *indptr, PyArrayObject *indices, PyArrayObject *data)
 {
@@ -915,11 +905,6 @@ AkxBlock_tile(AkxBlock *block, PyObject *args)
     PyErr_SetString(PyExc_IndexError, "block already has symmetric optimization");
     return NULL;
   }
-  if (block->implicit_blocks)
-  {
-    PyErr_SetString(PyExc_IndexError, "block is already partitioned into cache blocks");
-    return NULL;
-  }
   if (b_m > MAX_TILE_HEIGHT)
   {
     PyErr_SetString(PyExc_ValueError, "tile size too large");
@@ -1037,10 +1022,8 @@ AkxBlock_tile(AkxBlock *block, PyObject *args)
   newblock->perm = _ALLOC_(block->perm_size * sizeof(index_t));
   memcpy(newblock->perm, block->perm, block->perm_size * sizeof(index_t));
   newblock->symmetric_opt = 0;
-  newblock->implicit_blocks = 0;
   newblock->browptr_comp = 0;
   newblock->bcolidx_comp = 0;
-  newblock->computation_seq_comp = 0;
 
   return (PyObject *)newblock;
 }
@@ -1127,7 +1110,7 @@ AkxBlock_split(AkxBlock *block, PyObject *args)
 }
 
 PyDoc_STRVAR(symm_opt_doc,
-"block.symm_opt()");
+"block.symm_opt() -> new block");
 static PyObject *
 AkxBlock_symm_opt(AkxBlock *block, PyObject *args)
 {
@@ -1143,31 +1126,26 @@ AkxBlock_symm_opt(AkxBlock *block, PyObject *args)
     return NULL;
   }
 
-  if (block->implicit_blocks)
-  {
-    PyErr_SetString(PyExc_ValueError, "symmetric optimization cannot be done after implicit blocking");
-    return NULL;
-  }
+  AkxBlock *newblock = PyObject_New(AkxBlock, &AkxBlock_Type);
+  newblock->k = block->k;
+  bcsr_upper_triangle(&newblock->A_part, &block->A_part);
+  newblock->schedule = _ALLOC_(block->k * sizeof(index_t));
+  memcpy(newblock->schedule, block->schedule, block->k * sizeof(index_t));
+  newblock->perm_size = block->perm_size;
+  newblock->perm = _ALLOC_(block->perm_size * sizeof(index_t));
+  memcpy(newblock->perm, block->perm, block->perm_size * sizeof(index_t));
+  newblock->symmetric_opt = 1;
+  newblock->browptr_comp = 0;
+  newblock->bcolidx_comp = 0;
 
-  struct bcsr_t Anew;
-  bcsr_upper_triangle(&Anew, &block->A_part);
-  bcsr_free(&block->A_part);
-  memcpy(&block->A_part, &Anew, sizeof(struct bcsr_t));
-
-  block->symmetric_opt = 1;
-  Py_RETURN_NONE;
+  return (PyObject *)newblock;
 }
 
 PyDoc_STRVAR(implicitblocks_doc,
-"block.implicitblocks([n_parts, partition, stanza])");
+"block.implicitblocks(n_parts, partition, stanza)");
 static PyObject *
 AkxBlock_implicitblocks(AkxBlock *block, PyObject *args)
 {
-  destroy_implicit_blocks(block);
-
-  if (PyTuple_GET_SIZE(args) == 0)
-    Py_RETURN_NONE;
-
   int n_parts, stanza;
   PyObject *partition;
   if (!PyArg_ParseTuple(args, "iOi", &n_parts, &partition, &stanza))
@@ -1184,13 +1162,14 @@ AkxBlock_implicitblocks(AkxBlock *block, PyObject *args)
   struct set workspace;
   workspace_init(&workspace, block->A_part.nb);
 
-  make_implicit_blocks(block, &workspace, &cbp, n_parts, stanza);
+  AkxImplicitSeq *imp = PyObject_New(AkxImplicitSeq, &AkxImplicitSeq_Type);
+  make_implicit_blocks(imp, block, &workspace, &cbp, n_parts, stanza);
 
   workspace_free(&workspace);
 
   dest_partition_data(&cbp);
 
-  Py_RETURN_NONE;
+  return (PyObject *)imp;
 }
 
 static uint16_t *
@@ -1203,7 +1182,6 @@ index_comp(index_t *array, size_t size)
     assert(array[i] >= 0 && array[i] < 65536);
     out[i] = array[i];
   }
-  _FREE_(array);
   return out;
 }
 
@@ -1219,24 +1197,42 @@ AkxBlock_index_comp(AkxBlock *block, PyObject *args)
   if (block->A_part.nnzb < 65536)
   {
     block->browptr_comp = 1;
-    block->A_part.browptr16 = index_comp(block->A_part.browptr, block->A_part.mb + 1);
+    index_t *old = block->A_part.browptr;
+    block->A_part.browptr16 = index_comp(old, block->A_part.mb + 1);
+    _FREE_(old);
   }
   // bcolidx ranges from 0 to nb-1
   if (block->A_part.nb <= 65536)
   {
     block->bcolidx_comp = 1;
-    block->A_part.bcolidx16 = index_comp(block->A_part.bcolidx, block->A_part.nnzb);
+    index_t *old = block->A_part.bcolidx;
+    block->A_part.bcolidx16 = index_comp(old, block->A_part.nnzb);
+    _FREE_(old);
   }
-  // computation_seq ranges from 0 to mb-1
-  // TODO: not yet supported in template
-  /*if (block->implicit_blocks && block->A_part.mb <= 65536)
-  {
-    block->computation_seq_comp = 1;
-    block->computation_seq16 = index_comp(block->computation_seq,
-      block->level_start[block->implicit_blocks * block->k]);
-  }*/
 
   Py_RETURN_NONE;
+}
+
+PyDoc_STRVAR(AkxImplicitSeq_index_comp_doc,
+"imp.index_comp() -> new imp");
+static PyObject *
+AkxImplicitSeq_index_comp(AkxImplicitSeq *imp, PyObject *args)
+{
+  // computation_seq ranges from 0 to mb-1 (0 to mb when using stanza encoding)
+  // TODO: not yet supported in template
+
+  if (imp->mb >= 65536)
+    return (PyObject *)imp;
+
+  AkxImplicitSeq *newimp = PyObject_New(AkxImplicitSeq, &AkxImplicitSeq_Type);
+  newimp->k = imp->k;
+  newimp->nblocks = imp->nblocks;
+  newimp->level_start = _ALLOC_((imp->nblocks * imp->k + 1) * sizeof(index_t));
+  memcpy(newimp->level_start, imp->level_start, (imp->nblocks * imp->k + 1) * sizeof(index_t));
+  newimp->computation_seq16 = index_comp(imp->computation_seq, imp->level_start[imp->nblocks * imp->k]);
+  newimp->stanza = imp->stanza;
+  newimp->computation_seq_comp = 1;
+  return (PyObject *)newimp;
 }
 
 static void
@@ -1245,11 +1241,18 @@ AkxBlock_dealloc(AkxBlock *block)
 #ifdef TRACE
   fprintf(stderr, " = deleting block %p\n", block);
 #endif
-  destroy_implicit_blocks(block);
   bcsr_free(&block->A_part);
   _FREE_(block->schedule);
   _FREE_(block->perm);
   PyObject_Del(block);
+}
+
+static void
+AkxImplicitSeq_dealloc(AkxImplicitSeq *imp)
+{
+  _FREE_(imp->level_start);
+  _FREE_(imp->computation_seq);
+  PyObject_Del(imp);
 }
 
 #define METHOD(name, flags) { #name, (PyCFunction)AkxBlock_##name, flags, name##_doc },
@@ -1265,6 +1268,13 @@ static PyMethodDef AkxBlock_methods[] = {
   METHOD(split, METH_VARARGS)
   METHOD(symm_opt, METH_VARARGS)
   METHOD(implicitblocks, METH_VARARGS)
+  METHOD(index_comp, METH_VARARGS)
+  { NULL, NULL, 0, NULL }
+};
+#undef METHOD
+
+#define METHOD(name, flags) { #name, (PyCFunction)AkxImplicitSeq_##name, flags, AkxImplicitSeq_##name##_doc },
+static PyMethodDef AkxImplicitSeq_methods[] = {
   METHOD(index_comp, METH_VARARGS)
   { NULL, NULL, 0, NULL }
 };
@@ -1315,6 +1325,41 @@ static PyTypeObject AkxBlock_Type = {
 	0,/*AkxBlock_new,*/         /*tp_new*/
 };
 
+PyDoc_STRVAR(AkxImplicitSeq_doc,
+"AkxImplicitSeq documentation here. TODO");
+static PyTypeObject AkxImplicitSeq_Type = {
+	PyObject_HEAD_INIT(NULL)
+	0,                          /*tp_size*/
+	"AkxImplicitSeq",           /*tp_name*/
+	sizeof(AkxImplicitSeq),     /*tp_basicsize*/
+	0,                          /*tp_itemsize*/
+	/* methods */
+	(destructor)AkxImplicitSeq_dealloc, /*tp_dealloc*/
+	0,                          /*tp_print*/
+	0,                          /*tp_getattr*/
+	0,                          /*tp_setattr*/
+	0,                          /*tp_compare*/
+	0,                          /*tp_repr*/
+	0,                          /*tp_as_number*/
+	0,                          /*tp_as_sequence*/
+	0,                          /*tp_as_mapping*/
+	0,                          /*tp_hash*/
+	0,                          /*tp_call*/
+	0,                          /*tp_str*/
+	0,                          /*tp_getattro*/
+	0,                          /*tp_setattro*/
+	0,                          /*tp_as_buffer*/
+	Py_TPFLAGS_DEFAULT,         /*tp_flags*/
+	AkxImplicitSeq_doc,         /*tp_doc*/
+	0,                          /*tp_traverse*/
+	0,                          /*tp_clear*/
+	0,                          /*tp_richcompare*/
+	0,                          /*tp_weaklistoffset*/
+	0,                          /*tp_iter*/
+	0,                          /*tp_iternext*/
+	AkxImplicitSeq_methods,     /*tp_methods*/
+};
+
 static PyMethodDef methods[] = {
 	{ "tb_partition", Akx_tb_partition, METH_VARARGS, tb_partition_doc },
 	{ "threadblocks", Akx_threadblocks, METH_VARARGS, threadblocks_doc },
@@ -1332,9 +1377,13 @@ init_akx_static(void)
 
   if (PyType_Ready(&AkxBlock_Type) < 0)
     return;
-
   Py_INCREF(&AkxBlock_Type);
   PyModule_AddObject(module, "AkxBlock", (PyObject *)&AkxBlock_Type);
+
+  if (PyType_Ready(&AkxImplicitSeq_Type) < 0)
+    return;
+  Py_INCREF(&AkxImplicitSeq_Type);
+  PyModule_AddObject(module, "AkxImplicitSeq", (PyObject *)&AkxImplicitSeq_Type);
 
   import_array();
 }

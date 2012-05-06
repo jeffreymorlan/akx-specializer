@@ -98,21 +98,28 @@ typedef struct
 	                                // (number of rows, not number of row tiles)
 	index_t perm_size;
 	index_t *__restrict__ perm;
+} AkxBlock;
 
-	part_id_t implicit_blocks; // 0 = no implicit cache blocking
+typedef struct
+{
+	PyObject_HEAD
+
+	level_t k;
+	index_t mb;
+	part_id_t nblocks;
 	index_t *__restrict__ level_start;
 	union {
 		index_t *__restrict__ computation_seq;
 		uint16_t *__restrict__ computation_seq16;
 	};
-	int implicit_stanza; // 1 if computation_seq is stanza encoded, 0 if not
+	flag_t stanza; // 1 if computation_seq is stanza encoded, 0 if not
 	flag_t computation_seq_comp;
-} AkxBlock;
-
+} AkxImplicitSeq;
 
 struct akx_task
 {
-  AkxBlock *block;
+  AkxBlock *__restrict__ block;
+  AkxImplicitSeq *__restrict__ imp; // NULL if none
   index_t V_size;
   value_t *__restrict__ V;
 };
