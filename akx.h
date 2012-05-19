@@ -13,15 +13,15 @@ typedef char flag_t;     // Integers from 0 to 1
 
 #define P( condition ) {if( (condition) != 0 ) { printf( "\n FAILURE in %s, line %d\n", __FILE__, __LINE__ );exit( 1 );}}
 
-// Always padded always square always square tiles
-// TODO: find some way to keep track of padding
-struct bcsr_t
-{
-	index_t mb;
-	index_t nb;
-	index_t b_m;
-	index_t b_n;
-	int b_transpose; // 0 = row-major, 1 = column-major
+// Block-compressed-sparse-row matrix
+struct bcsr_t {
+	index_t mb;           // Height in tiles
+	index_t nb;           // Width in tiles
+	index_t b_m;          // Tile height
+	index_t b_n;          // Tile width
+	flag_t b_transpose;   // 0 = row-major tiles, 1 = column-major tiles
+	flag_t browptr_comp;  // if 1, browptr is 16 bits per entry
+	flag_t bcolidx_comp;  // if 1, bcolidx is 16 bits per entry
 	nnz_t nnzb;
 	union {
 		index_t *__restrict__ browptr;
@@ -35,43 +35,16 @@ struct bcsr_t
 };
 
 // Preprocessing macros
-void _COPY_AL_ ( const void * src, void * dst, size_t bytes)
-{
-  memcpy (dst, src, bytes);
-}
+#define _ALLOC_(bytes) _mm_malloc(bytes, 16)
+#define _FREE_(ptr) _mm_free(ptr)
 
-void _COPY_UAL_ (const void * src, void *dst, size_t bytes)
-{
-  memcpy (dst, src, bytes);
-}
-
-void * _ALLOC_ (size_t bytes)
-{
-  return _mm_malloc (bytes, 16);
-}
-
-void _FREE_ ( void * ptr )
-{
-  _mm_free (ptr);
-}
-
-struct hypergraph
-{
-	index_t n_nets;
-	pin_t n_pins;
-	pin_t   *__restrict__ netptr;
-	index_t *__restrict__ pins;
-};
-
-struct set
-{
+struct set {
 	index_t capacity;
 	flag_t *__restrict__ flags;
 	index_t *__restrict__ elements;
 };
 
-struct level_net
-{
+struct level_net {
 	index_t n_pins;
 	level_t n_levels;
 
@@ -79,20 +52,16 @@ struct level_net
 	index_t *__restrict__ levels;
 };
 
-struct partition_data
-{
+struct partition_data {
 	index_t *part_to_row;
 	index_t *ptr;
 };
 
-typedef struct
-{
+typedef struct {
 	PyObject_HEAD
 	level_t k;
 
 	struct bcsr_t A_part;
-	flag_t browptr_comp;
-	flag_t bcolidx_comp;
 	flag_t symmetric_opt; // if 1, only upper triangle is stored
 	index_t *__restrict__ schedule; // how many rows to process for each level
 	                                // (number of rows, not number of row tiles)
@@ -100,48 +69,41 @@ typedef struct
 	index_t *__restrict__ perm;
 } AkxBlock;
 
-typedef struct
-{
+typedef struct {
 	PyObject_HEAD
 
 	level_t k;
 	index_t mb;
 	part_id_t nblocks;
 	index_t *__restrict__ level_start;
-	union {
-		index_t *__restrict__ computation_seq;
-		uint16_t *__restrict__ computation_seq16;
-	};
+	index_t *__restrict__ computation_seq;
 	flag_t stanza; // 1 if computation_seq is stanza encoded, 0 if not
-	flag_t computation_seq_comp;
 } AkxImplicitSeq;
 
-struct akx_task
-{
-  AkxBlock *__restrict__ block;
-  AkxImplicitSeq *__restrict__ imp; // NULL if none
-  index_t V_size;
-  value_t *__restrict__ V;
+struct akx_task {
+	AkxBlock *__restrict__ block;
+	AkxImplicitSeq *__restrict__ imp; // NULL if none
+	index_t V_size;
+	value_t *__restrict__ V;
 };
 
-struct akx_data
-{
+struct akx_data {
 	level_t k;
 	value_t *V_global;
 	index_t V_global_m;
-	part_id_t nblocks;
-	struct akx_task *blocks;
+	part_id_t ntasks;
+	struct akx_task *tasks;
 	level_t steps;
 	value_t *__restrict__ coeffs;
 };
 
 typedef struct {
-  PyObject_HEAD
-  level_t k;
-  index_t matrix_size;
-  int nthreads;
-  struct akx_task *blocks;
-  int *thread_offset;
+	PyObject_HEAD
+	level_t k;
+	index_t matrix_size;
+	int nthreads;
+	struct akx_task *tasks;
+	int *thread_offset;
 } AkxObjectC;
 
 #endif

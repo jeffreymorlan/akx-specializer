@@ -1,4 +1,3 @@
-//#define TRACE
 #include <Python.h>
 #include <numpy/arrayobject.h>
 
@@ -144,10 +143,10 @@ pthread_barrier_t barrier;
     }
     ${store_y("yi", "ib", b_m, b_n, b_transpose)}
   %endif
-  %if usecoeffs:
+  %if basis == 1:
     // TODO: use SSE here too
     %for i in xrange(b_m):
-      y[ib*${b_m} + ${i}] += x[ib*${b_m} + ${i}] * coeff;
+      y[ib*${b_m} + ${i}] -= x[ib*${b_m} + ${i}] * coeff;
     %endfor
   %endif
 </%def>
@@ -172,7 +171,7 @@ void bcsr_spmv${format}_${b_m}_${b_n}_${b_transpose}_${browptr_comp}_${bcolidx_c
   const struct bcsr_t *__restrict__ A,
   const value_t *__restrict__ x,
   value_t *__restrict__ y,
-%if usecoeffs:
+%if basis == 1:
   value_t coeff,
 %endif
   index_t mb)
@@ -189,7 +188,7 @@ void bcsr_spmv${format}_rowlist_${b_m}_${b_n}_${b_transpose}_${browptr_comp}_${b
   const struct bcsr_t *__restrict__ A,
   const value_t *__restrict__ x,
   value_t *__restrict__ y,
-%if usecoeffs:
+%if basis == 1:
   value_t coeff,
 %endif
   index_t mb,
@@ -209,7 +208,7 @@ void bcsr_spmv${format}_stanzas_${b_m}_${b_n}_${b_transpose}_${browptr_comp}_${b
   const struct bcsr_t *__restrict__ A,
   const value_t *__restrict__ x,
   value_t *__restrict__ y,
-%if usecoeffs:
+%if basis == 1:
   value_t coeff,
 %endif
   index_t mb,
@@ -234,7 +233,7 @@ typedef void (*bcsr_func_noimplicit)(
   const struct bcsr_t *__restrict__ A,
   const value_t *__restrict__ x,
   value_t *__restrict__ y,
-%if usecoeffs:
+%if basis == 1:
   value_t coeff,
 %endif
   index_t mb);
@@ -242,7 +241,7 @@ typedef void (*bcsr_func_implicit)(
   const struct bcsr_t *__restrict__ A,
   const value_t *__restrict__ x,
   value_t *__restrict__ y,
-%if usecoeffs:
+%if basis == 1:
   value_t coeff,
 %endif
   index_t mb,
@@ -290,27 +289,27 @@ void * do_akx ( void *__restrict__ input )
       start = 0;
     glevel -= start;
 
-    part_id_t block;
-    for (block = 0; block < data->nblocks; block++) {
-      AkxBlock *__restrict__ eb = data->blocks[block].block;
-      AkxImplicitSeq *__restrict__ imp = data->blocks[block].imp;
-      index_t V_size = data->blocks[block].V_size;
-      value_t *V = data->blocks[block].V;
+    part_id_t taskno;
+    for (taskno = 0; taskno < data->ntasks; taskno++) {
+      AkxBlock *__restrict__ block = data->tasks[taskno].block;
+      AkxImplicitSeq *__restrict__ imp = data->tasks[taskno].imp;
+      index_t V_size = data->tasks[taskno].V_size;
+      value_t *V = data->tasks[taskno].V;
 #define V_LOCAL(l)  (&V[(l)*V_size])
 #define V_GLOBAL(l) (&data->V_global[(glevel+(l))*data->V_global_m])
       index_t i;
       // copy vector to local data using perm
       value_t *__restrict__ local = V_LOCAL(start);
       value_t *__restrict__ global = V_GLOBAL(start);
-      for (i = 0; i < eb->perm_size; ++i)
-        local[i] = global[eb->perm[i]];
+      for (i = 0; i < block->perm_size; ++i)
+        local[i] = global[block->perm[i]];
 
       struct bcsr_funcs *bf = bcsr_funcs_table;
-      while (bf->b_m != eb->A_part.b_m ||
-             bf->b_n != eb->A_part.b_n ||
-             bf->b_transpose != eb->A_part.b_transpose ||
-             bf->browptr_comp != eb->browptr_comp ||
-             bf->bcolidx_comp != eb->bcolidx_comp)
+      while (bf->b_m != block->A_part.b_m ||
+             bf->b_n != block->A_part.b_n ||
+             bf->b_transpose != block->A_part.b_transpose ||
+             bf->browptr_comp != block->A_part.browptr_comp ||
+             bf->bcolidx_comp != block->A_part.bcolidx_comp)
       {
         bf++;
         if (bf == &bcsr_funcs_table[sizeof bcsr_funcs_table / sizeof *bcsr_funcs_table])
@@ -320,24 +319,23 @@ void * do_akx ( void *__restrict__ input )
       level_t l;
       if (imp)
       {
-        bcsr_func_implicit func = bf->funcs[eb->symmetric_opt].implicit[imp->stanza];
-        part_id_t block;
+        bcsr_func_implicit func = bf->funcs[block->symmetric_opt].implicit[imp->stanza];
+        part_id_t ib;
 
-        if (eb->symmetric_opt)
-          memset(V_LOCAL(start+1), 0, sizeof(value_t) * V_size * (eb->k - start));
-        for (block = 0; block < imp->nblocks; block++)
+        if (block->symmetric_opt)
+          memset(V_LOCAL(start+1), 0, sizeof(value_t) * V_size * (block->k - start));
+        for (ib = 0; ib < imp->nblocks; ib++)
         {
-          for (l = start; l < eb->k; l++)
+          for (l = start; l < block->k; l++)
           {
-            index_t mb = (eb->schedule[l] + eb->A_part.b_m - 1) / eb->A_part.b_m;
-            index_t lev_start = imp->level_start[block * eb->k + l];
-            index_t lev_end   = imp->level_start[block * eb->k + l + 1];
-            //printf("thread %d block %d level %d (%d,%d)\n", pthread_self(), block, l, lev_start, lev_end);
+            index_t mb = (block->schedule[l] + block->A_part.b_m - 1) / block->A_part.b_m;
+            index_t lev_start = imp->level_start[ib * block->k + l];
+            index_t lev_end   = imp->level_start[ib * block->k + l + 1];
             func(
-              &eb->A_part,
+              &block->A_part,
               V_LOCAL(l),
               V_LOCAL(l+1),
-%if usecoeffs:
+%if basis == 1:
               data->coeffs[glevel + l],
 %endif
               mb,
@@ -345,43 +343,37 @@ void * do_akx ( void *__restrict__ input )
               lev_end - lev_start);
           }
         }
-        for (l = start; l < eb->k; l++)
+        for (l = start; l < block->k; l++)
         {
           // copy vector to global data using perm
           local = V_LOCAL(l+1);
           global = V_GLOBAL(l+1);
-          for (i = 0; i < eb->schedule[eb->k-1]; ++i)
-            global[eb->perm[i]] = local[i];
+          for (i = 0; i < block->schedule[block->k-1]; ++i)
+            global[block->perm[i]] = local[i];
         }
       }
       else
       {
-        bcsr_func_noimplicit func = bf->funcs[eb->symmetric_opt].noimplicit;
+        bcsr_func_noimplicit func = bf->funcs[block->symmetric_opt].noimplicit;
         // Perform k SpMVs
-        for (l = start; l < eb->k; ++l)
+        for (l = start; l < block->k; ++l)
         {
-          if (eb->symmetric_opt)
+          if (block->symmetric_opt)
             memset(V_LOCAL(l+1), 0, sizeof(value_t) * V_size);
-          // Monomial basis:
           func(
-            &eb->A_part,
+            &block->A_part,
             V_LOCAL(l),
             V_LOCAL(l+1),
-%if usecoeffs:
+%if basis == 1:
             data->coeffs[glevel + l],
 %endif
-            (eb->schedule[l] + eb->A_part.b_m - 1) / eb->A_part.b_m);
-          // Newton basis will be the spmv plus a _scal by the chosen shift:
-          //   x_{i+1} = Ax_i - \lambda*x_i
-          // Chebyshev basis will _scal the result of the spmv by 2 and _axpy with the prev. vector:
-          //   x_{i+1} = 2Ax_i - x_{i-1},
-          //   where x_{-1} = ones()
+            (block->schedule[l] + block->A_part.b_m - 1) / block->A_part.b_m);
 
           // copy vector to global data using perm
           local = V_LOCAL(l+1);
           global = V_GLOBAL(l+1);
-          for (i = 0; i < eb->schedule[eb->k-1]; ++i)
-            global[eb->perm[i]] = local[i];
+          for (i = 0; i < block->schedule[block->k-1]; ++i)
+            global[block->perm[i]] = local[i];
         }
       }
 #undef V_GLOBAL
@@ -400,15 +392,19 @@ void * do_akx ( void *__restrict__ input )
 }
 
 static PyObject *
+%if basis == 0:
 AkxObjectC_powers(AkxObjectC *akxobj, PyObject *args)
+%elif basis == 1:
+AkxObjectC_newton(AkxObjectC *akxobj, PyObject *args)
+%endif
 {
-%if usecoeffs:
-  PyArrayObject *vecs, *coeffs;
-  if (!PyArg_ParseTuple(args, "O!O!", &PyArray_Type, &vecs, &PyArray_Type, &coeffs))
-    return NULL;
-%else:
+%if basis == 0:
   PyArrayObject *vecs;
   if (!PyArg_ParseTuple(args, "O!", &PyArray_Type, &vecs, &PyArray_Type))
+    return NULL;
+%elif basis == 1:
+  PyArrayObject *vecs, *coeffs;
+  if (!PyArg_ParseTuple(args, "O!O!", &PyArray_Type, &vecs, &PyArray_Type, &coeffs))
     return NULL;
 %endif
 
@@ -420,7 +416,7 @@ AkxObjectC_powers(AkxObjectC *akxobj, PyObject *args)
     return NULL;
   }
 
-%if usecoeffs:
+%if basis == 1:
   if (coeffs->nd != 1
       || coeffs->dimensions[0] != (vecs->dimensions[0] - 1)
       || coeffs->strides[0] != sizeof(value_t))
@@ -439,10 +435,10 @@ AkxObjectC_powers(AkxObjectC *akxobj, PyObject *args)
     td[pp].k = akxobj->k;
     td[pp].V_global = (value_t *)vecs->data;
     td[pp].V_global_m = vecs->strides[0] / sizeof(value_t);
-    td[pp].nblocks = akxobj->thread_offset[pp+1] - akxobj->thread_offset[pp];
-    td[pp].blocks = &akxobj->blocks[akxobj->thread_offset[pp]];
+    td[pp].ntasks = akxobj->thread_offset[pp+1] - akxobj->thread_offset[pp];
+    td[pp].tasks = &akxobj->tasks[akxobj->thread_offset[pp]];
     td[pp].steps = vecs->dimensions[0] - 1;
-%if usecoeffs:
+%if basis == 1:
     td[pp].coeffs = (value_t *)coeffs->data;
 %endif
   }
@@ -507,14 +503,14 @@ AkxObjectC_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds)
   }
   self->thread_offset[thread] = total_blocks;
 
-  self->blocks = _ALLOC_(total_blocks * sizeof(struct akx_task));
+  self->tasks = _ALLOC_(total_blocks * sizeof(struct akx_task));
   for (thread = 0; thread < self->nthreads; thread++)
   {
     PyObject *sublist = PyList_GET_ITEM(list, thread);
     part_id_t j;
     for (j = 0; j < PyList_GET_SIZE(sublist); j++)
     {
-      struct akx_task *task = &self->blocks[self->thread_offset[thread] + j];
+      struct akx_task *task = &self->tasks[self->thread_offset[thread] + j];
 
       PyObject *item = PyList_GET_ITEM(sublist, j);
       AkxBlock *block;
@@ -556,18 +552,22 @@ AkxObjectC_dealloc(AkxObjectC *akxobj)
   index_t i;
   for (i = 0; i < akxobj->thread_offset[akxobj->nthreads]; i++)
   {
-    Py_DECREF(akxobj->blocks[i].block);
-    Py_XDECREF(akxobj->blocks[i].imp);
-    _FREE_(akxobj->blocks[i].V);
+    Py_DECREF(akxobj->tasks[i].block);
+    Py_XDECREF(akxobj->tasks[i].imp);
+    _FREE_(akxobj->tasks[i].V);
   }
-  _FREE_(akxobj->blocks);
+  _FREE_(akxobj->tasks);
   _FREE_(akxobj->thread_offset);
   PyObject_Del(akxobj);
 }
 
 #define METHOD(name, flags) { #name, (PyCFunction)AkxObjectC_##name, flags },
 static PyMethodDef AkxObjectC_methods[] = {
+%if basis == 0:
   METHOD(powers, METH_VARARGS)
+%elif basis == 1:
+  METHOD(newton, METH_VARARGS)
+%endif
   { NULL, NULL, 0, NULL }
 };
 #undef METHOD

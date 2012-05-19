@@ -8,7 +8,7 @@ Files included:
 * cgtest.py - test driver for CA-CG solver
 
 Libraries required:
-* asp (http://aspsejits.pbworks.com/)
+* asp (https://github.com/shoaibkamil/asp)
 * numpy and scipy (http://www.scipy.org/)
 * PaToH (http://bmi.osu.edu/~umit/software.html#patoh)
 * Intel MKL (not needed for the matrix powers kernel itself, but used for other operations in CA-CG solver)

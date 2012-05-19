@@ -1,4 +1,4 @@
-#!/usr/bin/python2.5
+#!/usr/bin/python
 
 import sys
 import time
@@ -9,12 +9,9 @@ parser.add_option("--scipy",        help="use scipy CG", action="store_true", de
 parser.add_option("-s", "--sejits", help="enable specialization", action="store_true", default=False)
 parser.add_option("-m",             help="total number of steps", type="int", default=120)
 parser.add_option("-k",             help="number of steps per iteration", type="int", default=1)
-#parser.add_option("--tb-part",      help="thread block partitioning method (1 = hypergraph)", type="int", default=0)
-#parser.add_option("--tb-num",       help="number of threads", type="int", default=1)
-#parser.add_option("--tile",         help="use tiling", action="store_true", default=False)
-#parser.add_option("--cb-part",      help="cache block partitioning method (1 = hypergraph)", type="int", default=0)
-#parser.add_option("--cb-num",       help="number of cache blocks (0 = no cache blocking)", type="int", default=0)
-#parser.add_option("--cb-rle",       help="enable run length encoding", action="store_true", default=False)
+parser.add_option("--tb-num",       help="number of threads", type="int", default=0)
+parser.add_option("-x",             help="use explicit cache blocking only", action="store_true", default=False)
+parser.add_option("-i",             help="use implicit cache blocking only", action="store_true", default=False)
 
 options, args = parser.parse_args()
 
@@ -65,8 +62,10 @@ if options.scipy:
 		cg_time = time.time() - cg_time
 		print "mul_time =", cg_time
 else:
-	import cacg
 	print >>sys.stderr, "Initializing akx...",
+	import akxconfig
+	if options.tb_num:
+		akxconfig.threadcounts = [options.tb_num]
 	import akx
 	print >>sys.stderr, "done"
 
@@ -74,14 +73,16 @@ else:
 		akxobj = akx.AkxObjectPy(matrix)
 	else:
 		tune_time = time.time()
-		akxobj = akx.tune(matrix, filename, options.k)
+		akxobj = akx.tune(matrix, options.k, True, show=sys.stdout, use_exp=not(options.i), use_imp=not(options.x))
 		tune_time = time.time() - tune_time
 		print "tuning time =", tune_time
 
+	import cacg
 	for i in xrange(5):
 		cg_time = time.time()
-		x = cacg.cg3_ca(akxobj, b, s=options.k, maxiter=options.m)
+		x = cacg.cg3_ca(akxobj, b, s=options.k, maxiter=options.m, tol=0, show_times=sys.stdout)
 		cg_time = time.time() - cg_time
 		print "time =", cg_time
 residual = (matrix * x) - b
 print "|r|^2 =", numpy.dot(residual, residual)
+print "gradient =", .5 * numpy.dot(x, residual - b)

@@ -2,7 +2,7 @@ import akx
 import numpy
 import time
 
-def cg3_ca(A, b, tol=1e-5, callback=None, s=1, maxiter=1000):
+def cg3_ca(A, b, tol=1e-5, callback=None, s=1, maxiter=1000, show_times=None):
 	N = b.shape[0]
 
 	xrV       = numpy.empty((2*s + 3, N))
@@ -84,6 +84,6 @@ def cg3_ca(A, b, tol=1e-5, callback=None, s=1, maxiter=1000):
 		old_gamma, gamma = gamma, old_gamma
 		old_rho,   rho   = rho,   old_rho
 
-	print "Powers:%.6f Dots:%.6f D:%.6f R:%.6f" % (
-		powers_time, dots_time, d_time, r_time)
+	if show_times:
+		print >>show_times, "Powers:%.6f Dots:%.6f D:%.6f R:%.6f" % (powers_time, dots_time, d_time, r_time)
 	return old_xrV[1]
